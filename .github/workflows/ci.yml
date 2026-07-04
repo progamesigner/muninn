@@ -80,10 +80,10 @@ jobs:
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: agentmem-${{ matrix.target }}${{ matrix.features && format('-{0}', matrix.features) || '' }}
+        name: muninn-${{ matrix.target }}${{ matrix.features && format('-{0}', matrix.features) || '' }}
         path: |
-          target/${{ matrix.target }}/release/agentmem
-          target/${{ matrix.target }}/release/agentmem.exe
+          target/${{ matrix.target }}/release/muninn
+          target/${{ matrix.target }}/release/muninn.exe
         if-no-files-found: ignore
 
   publish-image:
@@ -123,7 +123,7 @@ jobs:
       id: meta
       uses: docker/metadata-action@v6
       with:
-        images: ghcr.io/progamesigner/agentmem
+        images: ghcr.io/progamesigner/muninn
         tags: |
           type=semver,pattern={{version}}
           type=raw,value=latest
@@ -141,10 +141,10 @@ jobs:
         context: .
         build-args: |
           CARGO_FEATURES=recall-tantivy
-          AGENTMEM_RECALL_BACKEND=tantivy
+          MUNINN_RECALL_BACKEND=tantivy
         platforms: linux/amd64
         load: true
-        tags: agentmem:smoke-amd64
+        tags: muninn:smoke-amd64
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
@@ -154,10 +154,10 @@ jobs:
         context: .
         build-args: |
           CARGO_FEATURES=recall-tantivy
-          AGENTMEM_RECALL_BACKEND=tantivy
+          MUNINN_RECALL_BACKEND=tantivy
         platforms: linux/arm64
         load: true
-        tags: agentmem:smoke-arm64
+        tags: muninn:smoke-arm64
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
@@ -166,7 +166,7 @@ jobs:
         set -e
         for arch in amd64 arm64; do
           echo "::group::smoke linux/$arch"
-          docker run -d --name "smoke-$arch" -p 8000:8000 "agentmem:smoke-$arch"
+          docker run -d --name "smoke-$arch" -p 8000:8000 "muninn:smoke-$arch"
           ok=0
           for _ in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8000/healthz; then ok=1; break; fi
@@ -184,7 +184,7 @@ jobs:
         context: .
         build-args: |
           CARGO_FEATURES=recall-tantivy
-          AGENTMEM_RECALL_BACKEND=tantivy
+          MUNINN_RECALL_BACKEND=tantivy
         platforms: linux/amd64,linux/arm64
         push: true
         tags: ${{ steps.meta.outputs.tags }}

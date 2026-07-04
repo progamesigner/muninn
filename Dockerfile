@@ -40,14 +40,14 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo zigbuild --release --target "$(cat /tmp/triple)" \
         ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} \
- && cp "target/$(cat /tmp/triple)/release/agentmem" /agentmem \
+ && cp "target/$(cat /tmp/triple)/release/muninn" /muninn \
  && mkdir -p /vault
 
 # ---- runtime ----------------------------------------------------------------
 # Empty base: the static binary needs no libc, CA bundle, shell, or /tmp.
 FROM scratch AS runtime
 
-COPY --from=builder /agentmem /agentmem
+COPY --from=builder /muninn /muninn
 # Vault mountpoint owned by the nonroot uid so atomic writes (NamedTempFile in
 # the vault dir) and unmounted / anonymous-volume runs succeed.
 COPY --from=builder --chown=65532:65532 /vault /vault
@@ -60,17 +60,17 @@ USER 65532:65532
 # `docker build .` matches the lightweight binary; the published image overrides
 # it to `tantivy` (built with CARGO_FEATURES=recall-tantivy). Setting `tantivy`
 # without that feature is harmless — the engine falls back to `simple`.
-ARG AGENTMEM_RECALL_BACKEND=simple
+ARG MUNINN_RECALL_BACKEND=simple
 
-# AGENTMEM_ROOT_DIR is required and canonicalised at startup — point it at the
+# MUNINN_ROOT_DIR is required and canonicalised at startup — point it at the
 # volume. Bind HTTP to all interfaces; the built-in default (127.0.0.1) is
 # unreachable from outside the container.
-ENV AGENTMEM_ROOT_DIR=/vault \
-    AGENTMEM_TRANSPORT=http \
-    AGENTMEM_HTTP_BIND=0.0.0.0:8000 \
-    AGENTMEM_RECALL_BACKEND=${AGENTMEM_RECALL_BACKEND}
+ENV MUNINN_ROOT_DIR=/vault \
+    MUNINN_TRANSPORT=http \
+    MUNINN_HTTP_BIND=0.0.0.0:8000 \
+    MUNINN_RECALL_BACKEND=${MUNINN_RECALL_BACKEND}
 
 VOLUME ["/vault"]
 EXPOSE 8000
 
-ENTRYPOINT ["/agentmem"]
+ENTRYPOINT ["/muninn"]
