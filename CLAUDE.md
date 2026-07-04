@@ -11,7 +11,7 @@ Guidance for Claude Code when working in this repository.
   `git tag -v <tag>` before pushing.
 - **Release flow:** bump `version` in `Cargo.toml`, refresh `Cargo.lock`
   (`cargo check`), commit as `Release vX.Y.Z`, then create a signed tag
-  `vX.Y.Z` with message `agentmem X.Y.Z`. Pushing the tag triggers the CI
+  `vX.Y.Z` with message `muninn X.Y.Z`. Pushing the tag triggers the CI
   release jobs.
 - Run `cargo fmt --check`, `cargo clippy --all-targets`, and `cargo test`
   before committing release-bound work — CI rejects unformatted code.

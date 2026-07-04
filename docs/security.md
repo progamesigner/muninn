@@ -1,13 +1,13 @@
 # Security & trust model
 
-This document describes what `agentmem` guarantees, what it deliberately does not
+This document describes what `muninn` guarantees, what it deliberately does not
 guarantee in v1, and how to widen or narrow its visibility.
 
 ## Threat model at a glance
 
 | Concern | Stance |
 |---|---|
-| Claimed scope keys (`agent`, `user`, …) | **Bound to the bearer when `AGENTMEM_HTTP_TOKENS_FILE` is set** (HTTP transport): each token may only name the scopes its grant covers. Without a tokens file, scope keys are trusted claims, as in v1. |
+| Claimed scope keys (`agent`, `user`, …) | **Bound to the bearer when `MUNINN_HTTP_TOKENS_FILE` is set** (HTTP transport): each token may only name the scopes its grant covers. Without a tokens file, scope keys are trusted claims, as in v1. |
 | Path traversal (`..`, absolute paths, symlink escape) | **Prevented.** Structurally impossible to escape the vault root. |
 | Cross-scope access inside the agents folder | **Structurally impossible.** The resolver always appends the caller's own scope. |
 | Cross-scope leakage via `[[wikilinks]]` in shared notes | **Prevented.** A shared note linking to the caller's own scoped note is refused with `write_denied`; only the owning scope's suffix is ever persisted, and only in files that scope alone can read. |
@@ -23,7 +23,7 @@ scope. That is fine for a loopback sidecar whose clients are all launched by the
 same operator — and dishonest for a shared server reachable over the network.
 
 For the shared deployment, the HTTP transport supports **per-tenant scoped
-tokens** via `AGENTMEM_HTTP_TOKENS_FILE`, a JSON file mapping bearer tokens to
+tokens** via `MUNINN_HTTP_TOKENS_FILE`, a JSON file mapping bearer tokens to
 scope grants:
 
 ```json
@@ -41,7 +41,7 @@ scope grants:
   entries — a request is permitted when at least one entry matches every key.
 - **Authentication** happens in the transport middleware: when the tokens file
   is configured, every request to `/mcp` and `/v1/context` must present either a
-  configured scoped token or the static `AGENTMEM_HTTP_BEARER` (which keeps its
+  configured scoped token or the static `MUNINN_HTTP_BEARER` (which keeps its
   semantics as the operator token and carries the all-scopes grant); anything
   else is `401`. The probe routes stay open.
 - **Authorization** happens at scope validation, where every scoped surface
@@ -58,21 +58,21 @@ scope grants:
 - Standard secret-mount practice applies: keep the file readable only by the
   server's user (e.g. a Kubernetes `Secret` volume).
 
-Without a tokens file, `AGENTMEM_HTTP_BEARER` alone still protects only the
+Without a tokens file, `MUNINN_HTTP_BEARER` alone still protects only the
 **endpoint**, not individual tenants — a coarse gate, not per-scope
 authorization. The stdio transport is unchanged either way: the launching
 process owns the vault, so process-level trust applies by design.
 
 > **Operational guidance:** for shared or remote deployments, configure
-> `AGENTMEM_HTTP_TOKENS_FILE` so every client is confined to its own scopes, and
-> reserve `AGENTMEM_HTTP_BEARER` for operator tooling. Expose an
+> `MUNINN_HTTP_TOKENS_FILE` so every client is confined to its own scopes, and
+> reserve `MUNINN_HTTP_BEARER` for operator tooling. Expose an
 > unauthenticated or static-bearer-only server just to clients you trust to
 > honestly declare their own scope.
 
 The HTTP transport also enforces **DNS-rebinding protection** on the inbound
 `Host` header. By default only loopback hosts (`localhost`, `127.0.0.1`, `::1`)
 are accepted; off-host clients addressing the server by a Kubernetes Service DNS
-name or ingress hostname must be allow-listed via `AGENTMEM_HTTP_ALLOWED_HOSTS`,
+name or ingress hostname must be allow-listed via `MUNINN_HTTP_ALLOWED_HOSTS`,
 or their requests are rejected with `403`. Keep the list as tight as the
 deployment allows; reserve the `*` opt-out for cases where an upstream proxy or
 ingress already validates `Host`.
@@ -100,7 +100,7 @@ or crafted — that addresses another scope's file: a crafted path such as
 `Agents/jarvis.tony/PERSONA.jarvis.sam.jarvis.tony.md`, never sam's file. Listings
 likewise filter by the caller's own suffix, so other scopes' files are invisible.
 
-An empty scheme (`AGENTMEM_VFS_SCHEME=`) disables suffixing: the agents folder
+An empty scheme (`MUNINN_VFS_SCHEME=`) disables suffixing: the agents folder
 degenerates into a plain shared directory governed by the policy's outside-folder
 rules, with no own-scope isolation.
 
@@ -122,7 +122,7 @@ an empty scheme there are no scopes and the transform is a no-op.
 ## The four policies and their guarantees outside the agents folder
 
 There are exactly two regions: **inside** the agents folder and **outside** it but
-still within the vault root. One server-wide policy (`AGENTMEM_POLICY`) governs
+still within the vault root. One server-wide policy (`MUNINN_POLICY`) governs
 both:
 
 | Policy | Inside agents folder | Outside agents folder |
@@ -135,7 +135,7 @@ both:
 The distinction between the two refusal codes is deliberate: a region that is
 entirely unreachable (`scoped` outside) reports `path_not_permitted` and does not
 confirm whether a file exists; a region that is readable but not writable reports
-`write_denied`. When the agents folder is the vault root (`AGENTMEM_AGENTS_DIR=.`),
+`write_denied`. When the agents folder is the vault root (`MUNINN_AGENTS_DIR=.`),
 the "outside" region is empty and that column has no effect.
 
 ## Visibility filters
@@ -145,18 +145,18 @@ two filters apply to listing **and** to direct read/write/edit/delete:
 
 - **Hidden filter** — any path segment beginning with `.` is excluded by default.
   The configured agents folder is exempt even if it begins with `.` (e.g.
-  `AGENTMEM_AGENTS_DIR=.agents` stays traversable). Toggle off with
-  `AGENTMEM_INCLUDE_HIDDEN=true`.
+  `MUNINN_AGENTS_DIR=.agents` stays traversable). Toggle off with
+  `MUNINN_INCLUDE_HIDDEN=true`.
 - **Ignore-file filter** — `.gitignore` and `.obsidianignore` patterns are honoured
   hierarchically (the same machinery `ripgrep` uses). Toggle off with
-  `AGENTMEM_HONOR_IGNORE_FILES=false`.
+  `MUNINN_HONOR_IGNORE_FILES=false`.
 
 Direct addressing of an excluded path returns `path_not_permitted` — **not**
 `not_found` — so the filter does not leak whether the file actually exists.
 
 ### Widening visibility
 
-Set `AGENTMEM_INCLUDE_HIDDEN=true` and/or `AGENTMEM_HONOR_IGNORE_FILES=false` when
+Set `MUNINN_INCLUDE_HIDDEN=true` and/or `MUNINN_HONOR_IGNORE_FILES=false` when
 an operator genuinely wants the agent to see hidden or ignored files. Both default
 to the conservative setting.
 

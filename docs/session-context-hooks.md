@@ -2,7 +2,7 @@
 
 This guide wires the `GET /v1/bootstrap` endpoint (see [Session context](../README.md#session-context)) into the session-start mechanism of common agent clients, so every new session is bootstrapped with the scope's lean rules automatically — no manual tool call.
 
-> **HTTP transport only.** `GET /v1/bootstrap` is a plain HTTP route served by the HTTP transport. In stdio mode there is no HTTP listener and these hooks cannot reach it. Start the server with the default `--transport http` (or `AGENTMEM_TRANSPORT=http`), bound to `127.0.0.1:8000` by default.
+> **HTTP transport only.** `GET /v1/bootstrap` is a plain HTTP route served by the HTTP transport. In stdio mode there is no HTTP listener and these hooks cannot reach it. Start the server with the default `--transport http` (or `MUNINN_TRANSPORT=http`), bound to `127.0.0.1:8000` by default.
 
 > **Which endpoint?** Three render endpoints share the same scope binding, auth, and negotiation:
 > - **`/v1/bootstrap`** — the **lean** bootstrap, ordered server-owned-content first: a `# Session Bootstrap` heading, the scope banner, a pointer to the full context and the layout, then the scope's `RULES.md` last. The recommended SessionStart payload: small enough to survive a harness's byte budget, and it tells the agent to pull the rest (persona, memory, user profile, workflow prompt) on demand. It imposes no memory loop — recall/diary discipline is whatever your `RULES.md`/`PROMPT.md` define.
@@ -20,8 +20,8 @@ curl -sf 'http://127.0.0.1:8000/v1/bootstrap?agent=jarvis&user=tony'
 ```
 
 - Replace `agent`/`user` with your VFS-scheme placeholders and values. Each scheme placeholder is one query parameter.
-- `-s` silences progress; `-f` makes curl exit non-zero (and emit nothing) on HTTP errors or a down server, so a stopped AgentMem never injects a broken payload or blocks startup.
-- Add `-H "Authorization: Bearer <token>"` when the server was started with `--http-bearer` / `AGENTMEM_HTTP_BEARER`. Prefer referencing it from the environment (`-H "Authorization: Bearer $AGENTMEM_HTTP_BEARER"`) over inlining the secret.
+- `-s` silences progress; `-f` makes curl exit non-zero (and emit nothing) on HTTP errors or a down server, so a stopped Muninn never injects a broken payload or blocks startup.
+- Add `-H "Authorization: Bearer <token>"` when the server was started with `--http-bearer` / `MUNINN_HTTP_BEARER`. Prefer referencing it from the environment (`-H "Authorization: Bearer $MUNINN_HTTP_BEARER"`) over inlining the secret.
 - Add `-H 'Accept: application/json'` if you need `{ rendered, missing }` instead of raw markdown (for hooks that expect JSON).
 - Swap `/v1/bootstrap` for `/v1/context` to inject the full context up front, or `/v1/layout` for the vault conventions.
 
@@ -53,7 +53,7 @@ Add to `~/.claude/settings.json` (user-level → applies to every project) or a 
         "hooks": [
           {
             "type": "command",
-            "command": "curl -sf 'http://127.0.0.1:8000/v1/bootstrap?agent=jarvis&user=tony' -H \"Authorization: Bearer $AGENTMEM_HTTP_BEARER\""
+            "command": "curl -sf 'http://127.0.0.1:8000/v1/bootstrap?agent=jarvis&user=tony' -H \"Authorization: Bearer $MUNINN_HTTP_BEARER\""
           }
         ]
       }
@@ -77,8 +77,8 @@ matcher = "startup|resume"
 
 [[hooks.SessionStart.hooks]]
 type = "command"
-command = "curl -sf 'http://127.0.0.1:8000/v1/bootstrap?agent=jarvis&user=tony' -H \"Authorization: Bearer $AGENTMEM_HTTP_BEARER\""
-statusMessage = "Loading AgentMem session context"
+command = "curl -sf 'http://127.0.0.1:8000/v1/bootstrap?agent=jarvis&user=tony' -H \"Authorization: Bearer $MUNINN_HTTP_BEARER\""
+statusMessage = "Loading Muninn session context"
 timeout = 30
 ```
 
@@ -88,23 +88,23 @@ The `matcher` selects which `source` values fire the hook (`startup`, `resume`, 
 
 opencode has no stdout-injecting session-start hook, but a plugin can subscribe to `session.created`. Two practical options:
 
-**A. MCP fallback (simplest).** Register AgentMem as an MCP server in opencode's config and point the model at `load_session_context` via an instructions file. Add to `~/.config/opencode/opencode.json` (or project `.opencode/opencode.json`):
+**A. MCP fallback (simplest).** Register Muninn as an MCP server in opencode's config and point the model at `load_session_context` via an instructions file. Add to `~/.config/opencode/opencode.json` (or project `.opencode/opencode.json`):
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "agentmem": {
+    "muninn": {
       "type": "remote",
       "url": "http://127.0.0.1:8000/mcp",
-      "headers": { "Authorization": "Bearer ${AGENTMEM_HTTP_BEARER}" }
+      "headers": { "Authorization": "Bearer ${MUNINN_HTTP_BEARER}" }
     }
   },
-  "instructions": ["./.opencode/agentmem-bootstrap.md"]
+  "instructions": ["./.opencode/muninn-bootstrap.md"]
 }
 ```
 
-Then `./.opencode/agentmem-bootstrap.md`:
+Then `./.opencode/muninn-bootstrap.md`:
 
 ```markdown
 At the start of every session, call the `load_session_context` MCP tool with
@@ -112,12 +112,12 @@ arguments `{ "agent": "jarvis", "user": "tony" }` before doing anything else,
 and treat its `rendered` output as your operating context.
 ```
 
-**B. Plugin on `session.created` (forced injection).** Place a plugin at `~/.config/opencode/plugins/agentmem.ts` (global) or `.opencode/plugins/agentmem.ts` (project) that fetches `/v1/context` and pushes it into context. The hook receives a context object; fetch the markdown and feed it into the model however your opencode version exposes context injection (e.g. `output.context.push(...)`):
+**B. Plugin on `session.created` (forced injection).** Place a plugin at `~/.config/opencode/plugins/muninn.ts` (global) or `.opencode/plugins/muninn.ts` (project) that fetches `/v1/context` and pushes it into context. The hook receives a context object; fetch the markdown and feed it into the model however your opencode version exposes context injection (e.g. `output.context.push(...)`):
 
 ```typescript
 import type { Plugin } from "@opencode-ai/plugin"
 
-export const AgentmemContext: Plugin = async ({ $ }) => {
+export const MuninnContext: Plugin = async ({ $ }) => {
   return {
     "session.created": async (_input, output) => {
       const md = await $`curl -sf 'http://127.0.0.1:8000/v1/bootstrap?agent=jarvis&user=tony'`.text()
@@ -150,6 +150,6 @@ exec your-agent --system "$ctx" "$@"   # adapt to the client's prompt flag
 ## Troubleshooting
 
 - **Hook produces nothing.** Confirm the server is in HTTP mode and reachable: `curl -sf http://127.0.0.1:8000/healthz`. stdio mode has no HTTP endpoint.
-- **`401 Unauthorized`.** A bearer is configured but the hook omits or mismatches it. Add `-H "Authorization: Bearer $AGENTMEM_HTTP_BEARER"` and make sure the variable is exported in the environment the hook runs in.
+- **`401 Unauthorized`.** A bearer is configured but the hook omits or mismatches it. Add `-H "Authorization: Bearer $MUNINN_HTTP_BEARER"` and make sure the variable is exported in the environment the hook runs in.
 - **`400 Bad Request`.** A scope parameter is missing, empty, or not a scheme placeholder. The query params must match the server's VFS scheme exactly.
 - **Empty but `200`.** The scope's foundational files are absent — a fresh vault renders an instructions-only bootstrap, which is expected, not an error.

@@ -1,13 +1,13 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "agentmem": {
+    "muninn": {
       "type": "local",
       "command": ["cargo", "run"],
       "enabled": true,
       "environment": {
-        "AGENTMEM_ROOT_DIR": ".memory",
-        "AGENTMEM_TRANSPORT": "stdio"
+        "MUNINN_ROOT_DIR": ".memory",
+        "MUNINN_TRANSPORT": "stdio"
       }
     }
   }
