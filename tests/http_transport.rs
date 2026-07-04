@@ -229,7 +229,7 @@ async fn http_post_returns_json_and_no_session_id() {
         "stateless mode must not issue a session id"
     );
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["result"]["serverInfo"]["name"], "rmcp");
+    assert_eq!(body["result"]["serverInfo"]["name"], "muninn");
 
     // tools/call carrying no session id still resolves, as plain JSON.
     let call = json!({

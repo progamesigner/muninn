@@ -14,10 +14,11 @@ use std::sync::Arc;
 use rmcp::ServerHandler;
 use rmcp::model::{
     AnnotateAble, CallToolRequestParams, CallToolResult, GetPromptRequestParams, GetPromptResult,
-    InitializeRequestParams, InitializeResult, ListPromptsResult, ListResourceTemplatesResult,
-    ListToolsResult, PaginatedRequestParams, Prompt, PromptArgument, PromptMessage,
-    PromptMessageRole, ProtocolVersion, RawResourceTemplate, ReadResourceRequestParams,
-    ReadResourceResult, ResourceContents, ServerCapabilities, ServerInfo,
+    Implementation, InitializeRequestParams, InitializeResult, ListPromptsResult,
+    ListResourceTemplatesResult, ListToolsResult, PaginatedRequestParams, Prompt, PromptArgument,
+    PromptMessage, PromptMessageRole, ProtocolVersion, RawResourceTemplate,
+    ReadResourceRequestParams, ReadResourceResult, ResourceContents, ServerCapabilities,
+    ServerInfo,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, model::JsonObject};
@@ -238,9 +239,14 @@ fn request_grant(context: &RequestContext<RoleServer>) -> Grant {
 impl ServerHandler for MuninnServer {
     fn get_info(&self) -> ServerInfo {
         // `ServerInfo` is `#[non_exhaustive]`, so it cannot be built with a struct
-        // expression here; start from its `Default` (which already sets the protocol
-        // version and `Implementation::from_build_env()`) and override the rest.
+        // expression here; start from its `Default` and override the rest.
+        // `Implementation::from_build_env()` is *not* good enough for `server_info`:
+        // its `env!("CARGO_CRATE_NAME")` is baked in where that line is compiled
+        // (inside the `rmcp` crate itself), so it always resolves to `"rmcp"`
+        // regardless of which binary links it. Build our own from this crate's
+        // own build-time env instead.
         let mut info = ServerInfo::default();
+        info.server_info = Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         info.capabilities = ServerCapabilities::builder()
             .enable_tools()
             .enable_resources()
