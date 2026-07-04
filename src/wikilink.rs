@@ -17,7 +17,7 @@
 
 use camino::Utf8Path;
 
-use crate::error::AgentmemError;
+use crate::error::MuninnError;
 use crate::path::{
     PathResolver, VirtualPath, apply_suffix_to_link_target, strip_suffix_from_link_target,
 };
@@ -47,7 +47,7 @@ pub fn expand_links(
     file_region: Region,
     resolver: &PathResolver,
     index: &LinkIndex,
-) -> Result<String, AgentmemError> {
+) -> Result<String, MuninnError> {
     rewrite_links(content, |kind, target| {
         let Some(entry) = resolve_target(index, kind, target) else {
             return Ok(None); // dangling — leave verbatim
@@ -56,7 +56,7 @@ pub fn expand_links(
         // Leak guard: a shared file must not embed a suffixed link to a scoped note.
         if file_region == Region::OutsideAgentsFolder && entry.region == Region::InsideAgentsFolder
         {
-            return Err(AgentmemError::CrossScopeLink {
+            return Err(MuninnError::CrossScopeLink {
                 target: target.to_string(),
             });
         }
@@ -93,7 +93,7 @@ pub fn expand_links(
 pub fn strip_links(content: &str, rendered_scope: &str, resolver: &PathResolver) -> String {
     // strip_links never errors: an unrecognised target is simply left as-is.
     rewrite_links(content, |kind, target| {
-        Ok::<_, AgentmemError>(strip_target(kind, target, rendered_scope, resolver))
+        Ok::<_, MuninnError>(strip_target(kind, target, rendered_scope, resolver))
     })
     // The closure is infallible, so unwrap is safe.
     .unwrap_or_else(|_| content.to_string())
@@ -110,7 +110,7 @@ pub fn expand_value_links(
     file_region: Region,
     resolver: &PathResolver,
     index: &LinkIndex,
-) -> Result<serde_json::Value, AgentmemError> {
+) -> Result<serde_json::Value, MuninnError> {
     map_string_leaves(value, &mut |s| {
         expand_links(s, rendered_scope, file_region, resolver, index)
     })
@@ -125,7 +125,7 @@ pub fn strip_value_links(
     resolver: &PathResolver,
 ) -> serde_json::Value {
     map_string_leaves(value, &mut |s| {
-        Ok::<_, AgentmemError>(strip_links(s, rendered_scope, resolver))
+        Ok::<_, MuninnError>(strip_links(s, rendered_scope, resolver))
     })
     // The closure is infallible, so unwrap is safe.
     .unwrap_or_else(|_| value.clone())
@@ -137,9 +137,9 @@ pub fn strip_value_links(
 fn map_string_leaves<F>(
     value: &serde_json::Value,
     f: &mut F,
-) -> Result<serde_json::Value, AgentmemError>
+) -> Result<serde_json::Value, MuninnError>
 where
-    F: FnMut(&str) -> Result<String, AgentmemError>,
+    F: FnMut(&str) -> Result<String, MuninnError>,
 {
     use serde_json::Value;
     Ok(match value {
@@ -202,7 +202,7 @@ pub(crate) fn references_to(
             found = resolve_target(index, kind, clean)
                 .is_some_and(|entry| entry.clean_path == target_clean_path);
         }
-        Ok::<_, AgentmemError>(None)
+        Ok::<_, MuninnError>(None)
     });
     found
 }
@@ -277,7 +277,7 @@ pub(crate) fn retarget_links(
     file_region: Region,
     resolver: &PathResolver,
     index: &LinkIndex,
-) -> Result<(String, usize), AgentmemError> {
+) -> Result<(String, usize), MuninnError> {
     let post = post_rename_index(index, source_clean_path, destination);
     let mut count = 0usize;
     let rewritten = rewrite_links(content, |kind, target| {
@@ -291,7 +291,7 @@ pub(crate) fn retarget_links(
         if file_region == Region::OutsideAgentsFolder
             && destination.region == Region::InsideAgentsFolder
         {
-            return Err(AgentmemError::CrossScopeLink {
+            return Err(MuninnError::CrossScopeLink {
                 target: target.to_string(),
             });
         }
@@ -427,9 +427,9 @@ fn path_ends_with_segments(haystack: &str, needle: &str) -> bool {
 /// the target portion is replaced with `new` (alias, heading, embed prefix, and
 /// link text are preserved); `Ok(None)` leaves the link unchanged. The first
 /// `Err` aborts and propagates.
-fn rewrite_links<F>(content: &str, mut f: F) -> Result<String, AgentmemError>
+fn rewrite_links<F>(content: &str, mut f: F) -> Result<String, MuninnError>
 where
-    F: FnMut(LinkKind, &str) -> Result<Option<String>, AgentmemError>,
+    F: FnMut(LinkKind, &str) -> Result<Option<String>, MuninnError>,
 {
     let bytes = content.as_bytes();
     let mut out = String::with_capacity(content.len());
@@ -574,7 +574,7 @@ mod tests {
              [link](topics/rust.md) plus [web](https://x.com) and [a](#top)",
             |kind, target| {
                 seen.borrow_mut().push((kind, target.to_string()));
-                Ok::<_, AgentmemError>(None)
+                Ok::<_, MuninnError>(None)
             },
         )
         .unwrap();
@@ -597,7 +597,7 @@ mod tests {
     #[test]
     fn parser_replaces_target_only() {
         let out = rewrite_links("x [[rust#h|alias]] y ![[g]] z [t](a.md)", |kind, _t| {
-            Ok::<_, AgentmemError>(Some(match kind {
+            Ok::<_, MuninnError>(Some(match kind {
                 LinkKind::Wikilink => "NEW".to_string(),
                 LinkKind::Markdown => "NEW.md".to_string(),
             }))
@@ -701,7 +701,7 @@ mod tests {
             &idx,
         )
         .unwrap_err();
-        assert!(matches!(err, AgentmemError::CrossScopeLink { .. }));
+        assert!(matches!(err, MuninnError::CrossScopeLink { .. }));
         assert_eq!(err.code(), crate::error::ErrorCode::WriteDenied);
     }
 
@@ -988,7 +988,7 @@ mod tests {
             &idx,
         )
         .unwrap_err();
-        assert!(matches!(err, AgentmemError::CrossScopeLink { .. }));
+        assert!(matches!(err, MuninnError::CrossScopeLink { .. }));
         assert_eq!(err.code(), crate::error::ErrorCode::WriteDenied);
     }
 
@@ -1082,7 +1082,7 @@ mod tests {
         let value = serde_json::json!({ "links": [{ "see": "[[rust]]" }] });
         let err = expand_value_links(&value, "jarvis.tony", Region::OutsideAgentsFolder, &r, &idx)
             .unwrap_err();
-        assert!(matches!(err, AgentmemError::CrossScopeLink { .. }));
+        assert!(matches!(err, MuninnError::CrossScopeLink { .. }));
         assert_eq!(err.code(), crate::error::ErrorCode::WriteDenied);
     }
 

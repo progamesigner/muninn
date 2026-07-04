@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime};
 
 use crate::config::{RecallBackendKind, RecallConfig};
-use crate::error::AgentmemError;
+use crate::error::MuninnError;
 use crate::path::PhysicalPath;
 use crate::policy::Region;
 use crate::storage::{Cursor, Storage};
@@ -203,7 +203,7 @@ impl RecallEngine {
                 #[cfg(not(feature = "recall-tantivy"))]
                 {
                     tracing::warn!(
-                        "AGENTMEM_RECALL_BACKEND=tantivy but the binary was built without the \
+                        "MUNINN_RECALL_BACKEND=tantivy but the binary was built without the \
                          'recall-tantivy' feature; falling back to the simple backend"
                     );
                     RecallBackendKind::Simple
@@ -338,12 +338,12 @@ impl RecallEngine {
         rendered_scope: &str,
         regions: &[Region],
         query: &RecallQuery,
-    ) -> Result<RecallResults, AgentmemError> {
+    ) -> Result<RecallResults, MuninnError> {
         if !query.filters.is_empty() && !self.supports_property_filters() {
-            return Err(AgentmemError::Unsupported {
+            return Err(MuninnError::Unsupported {
                 message: "frontmatter property filters require the tantivy backend \
                           (build with --features recall-tantivy and set \
-                          AGENTMEM_RECALL_BACKEND=tantivy)"
+                          MUNINN_RECALL_BACKEND=tantivy)"
                     .to_string(),
             });
         }
@@ -575,7 +575,7 @@ fn read_for_index(
     idx: &RegionIndex,
     physical: &PhysicalPath,
     storage: &Storage,
-) -> Result<String, AgentmemError> {
+) -> Result<String, MuninnError> {
     let body = storage.read(physical)?;
     Ok(match &idx.region {
         IndexRegion::Scoped(scope) => {
@@ -707,13 +707,13 @@ fn clean_path_for(idx: &RegionIndex, physical: &PhysicalPath, storage: &Storage)
 }
 
 /// Compile a query for the backends, validating the regex.
-fn compile_query(query: &RecallQuery) -> Result<CompiledQuery, AgentmemError> {
+fn compile_query(query: &RecallQuery) -> Result<CompiledQuery, MuninnError> {
     let raw_text = query.text.as_ref().filter(|s| !s.is_empty()).cloned();
     let substring = raw_text.as_ref().map(|s| s.to_lowercase());
     let regex = match query.regex.as_ref().filter(|s| !s.is_empty()) {
         Some(pattern) => {
             Some(
-                regex::Regex::new(pattern).map_err(|e| AgentmemError::InvalidArgument {
+                regex::Regex::new(pattern).map_err(|e| MuninnError::InvalidArgument {
                     message: format!("invalid regex: {e}"),
                 })?,
             )

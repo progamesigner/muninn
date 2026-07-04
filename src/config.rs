@@ -2,7 +2,7 @@
 //!
 //! The canonical configuration surface is the environment; CLI flags (parsed by
 //! [`Cli`]) override the matching variable. Every variable except
-//! `AGENTMEM_ROOT_DIR` has a default, and invalid values fail fast with a
+//! `MUNINN_ROOT_DIR` has a default, and invalid values fail fast with a
 //! human-readable message naming the offending variable.
 
 use std::collections::{BTreeMap, HashMap};
@@ -14,7 +14,7 @@ use std::time::Duration;
 use camino::Utf8PathBuf;
 use chrono_tz::Tz;
 
-use crate::error::AgentmemError;
+use crate::error::MuninnError;
 use crate::policy::Policy;
 use crate::scheme::Scheme;
 
@@ -29,7 +29,7 @@ pub const DEFAULT_MEMORY_LAYOUT_FILE: &str = "AGENT_MEMORY_LAYOUT.md";
 /// The default HTTP bind address.
 pub const DEFAULT_HTTP_BIND: &str = "127.0.0.1:8000";
 /// The default tracing filter directive.
-pub const DEFAULT_LOG_FILTER: &str = "warn,agentmem=info";
+pub const DEFAULT_LOG_FILTER: &str = "warn,muninn=info";
 
 /// Default filesystem-watcher debounce window, in milliseconds.
 pub const DEFAULT_RECALL_WATCH_DEBOUNCE_MS: u64 = 500;
@@ -43,28 +43,28 @@ pub const DEFAULT_RECALL_MAX_RESIDENT_SCOPES: usize = 256;
 /// reconcile for this long after the last one (unless the watcher marks it dirty).
 pub const DEFAULT_RECALL_FRESHNESS_MS: u64 = 2000;
 
-const VAR_ROOT_DIR: &str = "AGENTMEM_ROOT_DIR";
-const VAR_AGENTS_DIR: &str = "AGENTMEM_AGENTS_DIR";
-const VAR_SCHEME: &str = "AGENTMEM_VFS_SCHEME";
-const VAR_SESSION_CONTEXT_TEMPLATE_FILE: &str = "AGENTMEM_SESSION_CONTEXT_TEMPLATE_FILE";
-const VAR_SESSION_BOOTSTRAP_TEMPLATE_FILE: &str = "AGENTMEM_SESSION_BOOTSTRAP_TEMPLATE_FILE";
-const VAR_MEMORY_LAYOUT_TEMPLATE_FILE: &str = "AGENTMEM_MEMORY_LAYOUT_TEMPLATE_FILE";
-const VAR_POLICY: &str = "AGENTMEM_POLICY";
-const VAR_TRANSPORT: &str = "AGENTMEM_TRANSPORT";
-const VAR_HTTP_BIND: &str = "AGENTMEM_HTTP_BIND";
-const VAR_HTTP_BEARER: &str = "AGENTMEM_HTTP_BEARER";
-const VAR_HTTP_TOKENS_FILE: &str = "AGENTMEM_HTTP_TOKENS_FILE";
-const VAR_HTTP_ALLOWED_HOSTS: &str = "AGENTMEM_HTTP_ALLOWED_HOSTS";
-const VAR_TIMEZONE: &str = "AGENTMEM_TIMEZONE";
-const VAR_HONOR_IGNORE: &str = "AGENTMEM_HONOR_IGNORE_FILES";
-const VAR_INCLUDE_HIDDEN: &str = "AGENTMEM_INCLUDE_HIDDEN";
-const VAR_INCLUDE_HIDDEN_GLOBS: &str = "AGENTMEM_INCLUDE_HIDDEN_GLOBS";
-const VAR_LOG: &str = "AGENTMEM_LOG";
-const VAR_RECALL_BACKEND: &str = "AGENTMEM_RECALL_BACKEND";
-const VAR_RECALL_WATCH_DEBOUNCE_MS: &str = "AGENTMEM_RECALL_WATCH_DEBOUNCE_MS";
-const VAR_RECALL_REGEX_SCAN_BYTES: &str = "AGENTMEM_RECALL_REGEX_SCAN_BYTES";
-const VAR_RECALL_MAX_RESIDENT_SCOPES: &str = "AGENTMEM_RECALL_MAX_RESIDENT_SCOPES";
-const VAR_RECALL_FRESHNESS_MS: &str = "AGENTMEM_RECALL_FRESHNESS_MS";
+const VAR_ROOT_DIR: &str = "MUNINN_ROOT_DIR";
+const VAR_AGENTS_DIR: &str = "MUNINN_AGENTS_DIR";
+const VAR_SCHEME: &str = "MUNINN_VFS_SCHEME";
+const VAR_SESSION_CONTEXT_TEMPLATE_FILE: &str = "MUNINN_SESSION_CONTEXT_TEMPLATE_FILE";
+const VAR_SESSION_BOOTSTRAP_TEMPLATE_FILE: &str = "MUNINN_SESSION_BOOTSTRAP_TEMPLATE_FILE";
+const VAR_MEMORY_LAYOUT_TEMPLATE_FILE: &str = "MUNINN_MEMORY_LAYOUT_TEMPLATE_FILE";
+const VAR_POLICY: &str = "MUNINN_POLICY";
+const VAR_TRANSPORT: &str = "MUNINN_TRANSPORT";
+const VAR_HTTP_BIND: &str = "MUNINN_HTTP_BIND";
+const VAR_HTTP_BEARER: &str = "MUNINN_HTTP_BEARER";
+const VAR_HTTP_TOKENS_FILE: &str = "MUNINN_HTTP_TOKENS_FILE";
+const VAR_HTTP_ALLOWED_HOSTS: &str = "MUNINN_HTTP_ALLOWED_HOSTS";
+const VAR_TIMEZONE: &str = "MUNINN_TIMEZONE";
+const VAR_HONOR_IGNORE: &str = "MUNINN_HONOR_IGNORE_FILES";
+const VAR_INCLUDE_HIDDEN: &str = "MUNINN_INCLUDE_HIDDEN";
+const VAR_INCLUDE_HIDDEN_GLOBS: &str = "MUNINN_INCLUDE_HIDDEN_GLOBS";
+const VAR_LOG: &str = "MUNINN_LOG";
+const VAR_RECALL_BACKEND: &str = "MUNINN_RECALL_BACKEND";
+const VAR_RECALL_WATCH_DEBOUNCE_MS: &str = "MUNINN_RECALL_WATCH_DEBOUNCE_MS";
+const VAR_RECALL_REGEX_SCAN_BYTES: &str = "MUNINN_RECALL_REGEX_SCAN_BYTES";
+const VAR_RECALL_MAX_RESIDENT_SCOPES: &str = "MUNINN_RECALL_MAX_RESIDENT_SCOPES";
+const VAR_RECALL_FRESHNESS_MS: &str = "MUNINN_RECALL_FRESHNESS_MS";
 
 /// The selected transport and its parameters.
 #[derive(Clone, PartialEq, Eq)]
@@ -73,7 +73,7 @@ pub enum Transport {
     Http {
         bind: SocketAddr,
         bearer: Option<String>,
-        /// Per-token scope grants parsed from `AGENTMEM_HTTP_TOKENS_FILE`;
+        /// Per-token scope grants parsed from `MUNINN_HTTP_TOKENS_FILE`;
         /// `None` when the variable is unset.
         tokens: Option<TokenGrants>,
         /// `Host`-header allow-list for the Streamable HTTP transport. Empty
@@ -169,7 +169,7 @@ impl Grant {
         &self,
         order: &[&str],
         scope: &BTreeMap<String, String>,
-    ) -> Result<(), AgentmemError> {
+    ) -> Result<(), MuninnError> {
         let entries = match self {
             Grant::AllScopes => return Ok(()),
             Grant::Entries(entries) => entries,
@@ -181,7 +181,7 @@ impl Grant {
             };
             alive.retain(|entry| entry.get(*key).is_some_and(|m| m.matches(value)));
             if alive.is_empty() {
-                return Err(AgentmemError::ScopeDenied {
+                return Err(MuninnError::ScopeDenied {
                     key: (*key).to_string(),
                 });
             }
@@ -190,7 +190,7 @@ impl Grant {
     }
 }
 
-/// The token → grant table parsed from `AGENTMEM_HTTP_TOKENS_FILE`. Holds the
+/// The token → grant table parsed from `MUNINN_HTTP_TOKENS_FILE`. Holds the
 /// raw token values, so its `Debug` prints only the table size.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TokenGrants {
@@ -207,7 +207,7 @@ impl std::fmt::Debug for TokenGrants {
 impl TokenGrants {
     /// Parse and validate the tokens-file JSON against the active scheme.
     /// Error messages name the offending key or pattern but never echo a token.
-    fn parse(text: &str, scheme: &Scheme) -> Result<TokenGrants, AgentmemError> {
+    fn parse(text: &str, scheme: &Scheme) -> Result<TokenGrants, MuninnError> {
         #[derive(serde::Deserialize)]
         struct File {
             tokens: Vec<Entry>,
@@ -292,8 +292,8 @@ impl TokenGrants {
     }
 }
 
-/// Load and validate the `AGENTMEM_HTTP_TOKENS_FILE` grant file.
-fn load_tokens_file(path: &str, scheme: &Scheme) -> Result<TokenGrants, AgentmemError> {
+/// Load and validate the `MUNINN_HTTP_TOKENS_FILE` grant file.
+fn load_tokens_file(path: &str, scheme: &Scheme) -> Result<TokenGrants, MuninnError> {
     let text = std::fs::read_to_string(path).map_err(|e| {
         config_err(format!(
             "{VAR_HTTP_TOKENS_FILE} could not be read ({path}): {kind}",
@@ -319,7 +319,7 @@ impl RecallBackendKind {
     /// The accepted variable values, for error messages.
     pub const ACCEPTED: &'static [&'static str] = &["simple", "tantivy", "off"];
 
-    /// Parse the `AGENTMEM_RECALL_BACKEND` value.
+    /// Parse the `MUNINN_RECALL_BACKEND` value.
     pub fn parse(s: &str) -> Option<RecallBackendKind> {
         match s {
             "simple" => Some(RecallBackendKind::Simple),
@@ -389,66 +389,66 @@ pub struct Config {
 /// CLI flags that mirror — and override — the environment variables.
 #[derive(Debug, Default, clap::Parser)]
 #[command(
-    name = "agentmem",
+    name = "muninn",
     version,
     about = "MCP server for multi-tenant agent memory"
 )]
 pub struct Cli {
-    /// Vault root directory (overrides AGENTMEM_ROOT_DIR).
+    /// Vault root directory (overrides MUNINN_ROOT_DIR).
     #[arg(long)]
     pub root_dir: Option<PathBuf>,
-    /// Agents folder name (overrides AGENTMEM_AGENTS_DIR).
+    /// Agents folder name (overrides MUNINN_AGENTS_DIR).
     #[arg(long)]
     pub agents_dir: Option<String>,
-    /// VFS suffix scheme (overrides AGENTMEM_VFS_SCHEME).
+    /// VFS suffix scheme (overrides MUNINN_VFS_SCHEME).
     #[arg(long)]
     pub vfs_scheme: Option<String>,
-    /// Global session-context template file (overrides AGENTMEM_SESSION_CONTEXT_TEMPLATE_FILE).
+    /// Global session-context template file (overrides MUNINN_SESSION_CONTEXT_TEMPLATE_FILE).
     #[arg(long)]
     pub session_context_template_file: Option<PathBuf>,
-    /// Global session-bootstrap template file (overrides AGENTMEM_SESSION_BOOTSTRAP_TEMPLATE_FILE).
+    /// Global session-bootstrap template file (overrides MUNINN_SESSION_BOOTSTRAP_TEMPLATE_FILE).
     #[arg(long)]
     pub session_bootstrap_template_file: Option<PathBuf>,
-    /// Global memory-layout template file (overrides AGENTMEM_MEMORY_LAYOUT_TEMPLATE_FILE).
+    /// Global memory-layout template file (overrides MUNINN_MEMORY_LAYOUT_TEMPLATE_FILE).
     #[arg(long)]
     pub memory_layout_template_file: Option<PathBuf>,
-    /// Policy: scoped|namespaced|readonly|readwrite (overrides AGENTMEM_POLICY).
+    /// Policy: scoped|namespaced|readonly|readwrite (overrides MUNINN_POLICY).
     #[arg(long)]
     pub policy: Option<String>,
-    /// Transport: stdio|http (overrides AGENTMEM_TRANSPORT).
+    /// Transport: stdio|http (overrides MUNINN_TRANSPORT).
     #[arg(long)]
     pub transport: Option<String>,
-    /// HTTP bind address (overrides AGENTMEM_HTTP_BIND).
+    /// HTTP bind address (overrides MUNINN_HTTP_BIND).
     #[arg(long)]
     pub http_bind: Option<String>,
-    /// HTTP bearer token (overrides AGENTMEM_HTTP_BEARER).
+    /// HTTP bearer token (overrides MUNINN_HTTP_BEARER).
     #[arg(long)]
     pub http_bearer: Option<String>,
     /// JSON file mapping bearer tokens to scope grants for the HTTP transport
-    /// (overrides AGENTMEM_HTTP_TOKENS_FILE).
+    /// (overrides MUNINN_HTTP_TOKENS_FILE).
     #[arg(long)]
     pub http_tokens_file: Option<PathBuf>,
     /// Comma-separated `Host` allow-list for the HTTP transport; `*` disables
-    /// validation (overrides AGENTMEM_HTTP_ALLOWED_HOSTS).
+    /// validation (overrides MUNINN_HTTP_ALLOWED_HOSTS).
     #[arg(long)]
     pub http_allowed_hosts: Option<String>,
-    /// IANA timezone (overrides AGENTMEM_TIMEZONE).
+    /// IANA timezone (overrides MUNINN_TIMEZONE).
     #[arg(long)]
     pub timezone: Option<String>,
-    /// Honour .gitignore/.obsidianignore (overrides AGENTMEM_HONOR_IGNORE_FILES).
+    /// Honour .gitignore/.obsidianignore (overrides MUNINN_HONOR_IGNORE_FILES).
     #[arg(long)]
     pub honor_ignore_files: Option<bool>,
-    /// Include hidden dotfiles (overrides AGENTMEM_INCLUDE_HIDDEN).
+    /// Include hidden dotfiles (overrides MUNINN_INCLUDE_HIDDEN).
     #[arg(long)]
     pub include_hidden: Option<bool>,
     /// Comma-separated globs whose matches are exempt from hidden filtering
-    /// (overrides AGENTMEM_INCLUDE_HIDDEN_GLOBS).
+    /// (overrides MUNINN_INCLUDE_HIDDEN_GLOBS).
     #[arg(long)]
     pub include_hidden_globs: Option<String>,
-    /// Tracing filter directive (overrides AGENTMEM_LOG).
+    /// Tracing filter directive (overrides MUNINN_LOG).
     #[arg(long)]
     pub log: Option<String>,
-    /// Recall backend: simple|tantivy|off (overrides AGENTMEM_RECALL_BACKEND).
+    /// Recall backend: simple|tantivy|off (overrides MUNINN_RECALL_BACKEND).
     #[arg(long)]
     pub recall_backend: Option<String>,
     /// Print the effective configuration to stderr and exit.
@@ -527,27 +527,27 @@ impl Cli {
     }
 }
 
-fn config_err(message: impl Into<String>) -> AgentmemError {
-    AgentmemError::Config {
+fn config_err(message: impl Into<String>) -> MuninnError {
+    MuninnError::Config {
         message: message.into(),
     }
 }
 
 impl Config {
     /// Build configuration from the process environment.
-    pub fn from_env() -> Result<Config, AgentmemError> {
+    pub fn from_env() -> Result<Config, MuninnError> {
         Config::build(&|k| std::env::var(k).ok())
     }
 
     /// Build configuration from the process environment, with CLI flags taking
     /// precedence over the matching variable.
-    pub fn from_cli_and_env(cli: &Cli) -> Result<Config, AgentmemError> {
+    pub fn from_cli_and_env(cli: &Cli) -> Result<Config, MuninnError> {
         let overrides = cli.as_overrides();
         Config::build(&|k| overrides.get(k).cloned().or_else(|| std::env::var(k).ok()))
     }
 
     /// Core builder over an arbitrary variable getter (used by tests too).
-    fn build(get: &dyn Fn(&str) -> Option<String>) -> Result<Config, AgentmemError> {
+    fn build(get: &dyn Fn(&str) -> Option<String>) -> Result<Config, MuninnError> {
         // --- root dir (required) ---
         let root_raw = get(VAR_ROOT_DIR)
             .filter(|s| !s.is_empty())
@@ -735,7 +735,7 @@ impl Config {
     }
 
     #[cfg(test)]
-    fn from_pairs(pairs: &[(&str, &str)]) -> Result<Config, AgentmemError> {
+    fn from_pairs(pairs: &[(&str, &str)]) -> Result<Config, MuninnError> {
         let map: HashMap<String, String> = pairs
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -746,7 +746,7 @@ impl Config {
 
 /// Parse the agents-folder name. `.` or empty means "the vault root"; otherwise
 /// it must be a relative path with no traversal.
-fn parse_agents_dir(raw: &str) -> Result<Utf8PathBuf, AgentmemError> {
+fn parse_agents_dir(raw: &str) -> Result<Utf8PathBuf, MuninnError> {
     if raw.is_empty() || raw == "." {
         return Ok(Utf8PathBuf::new());
     }
@@ -773,7 +773,7 @@ fn parse_agents_dir(raw: &str) -> Result<Utf8PathBuf, AgentmemError> {
 fn parse_transport(
     get: &dyn Fn(&str) -> Option<String>,
     scheme: &Scheme,
-) -> Result<Transport, AgentmemError> {
+) -> Result<Transport, MuninnError> {
     let kind = get(VAR_TRANSPORT).unwrap_or_else(|| "http".to_string());
     match kind.as_str() {
         "stdio" => Ok(Transport::Stdio),
@@ -816,7 +816,7 @@ fn parse_transport(
 /// Parse the recall configuration block. The backend value is validated here; the
 /// effective backend (honouring the `recall-tantivy` feature) is resolved later by
 /// the engine. Tuning knobs fall back to their documented defaults.
-fn parse_recall(get: &dyn Fn(&str) -> Option<String>) -> Result<RecallConfig, AgentmemError> {
+fn parse_recall(get: &dyn Fn(&str) -> Option<String>) -> Result<RecallConfig, MuninnError> {
     let backend = match get(VAR_RECALL_BACKEND).filter(|s| !s.is_empty()) {
         Some(raw) => RecallBackendKind::parse(&raw).ok_or_else(|| {
             config_err(format!(
@@ -859,7 +859,7 @@ fn parse_u64(
     get: &dyn Fn(&str) -> Option<String>,
     var: &str,
     default: u64,
-) -> Result<u64, AgentmemError> {
+) -> Result<u64, MuninnError> {
     match get(var).filter(|s| !s.is_empty()) {
         None => Ok(default),
         Some(v) => v
@@ -872,7 +872,7 @@ fn parse_bool(
     get: &dyn Fn(&str) -> Option<String>,
     var: &str,
     default: bool,
-) -> Result<bool, AgentmemError> {
+) -> Result<bool, MuninnError> {
     match get(var) {
         None => Ok(default),
         Some(v) => match v.as_str() {
@@ -917,7 +917,7 @@ mod tests {
         v
     }
 
-    fn build(pairs: Vec<(&str, String)>) -> Result<Config, AgentmemError> {
+    fn build(pairs: Vec<(&str, String)>) -> Result<Config, MuninnError> {
         let map: HashMap<String, String> =
             pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
         Config::build(&|k| map.get(k).cloned())
@@ -1042,13 +1042,13 @@ mod tests {
             &tmp,
             &[(
                 VAR_SESSION_CONTEXT_TEMPLATE_FILE,
-                "/etc/agentmem/bootstrap.md",
+                "/etc/muninn/bootstrap.md",
             )],
         ))
         .unwrap();
         assert_eq!(
             cfg.session_context_template_file,
-            PathBuf::from("/etc/agentmem/bootstrap.md")
+            PathBuf::from("/etc/muninn/bootstrap.md")
         );
     }
 
@@ -1090,18 +1090,18 @@ mod tests {
         let cfg = build(with_root(
             &tmp,
             &[
-                (VAR_SESSION_BOOTSTRAP_TEMPLATE_FILE, "/etc/agentmem/lean.md"),
-                (VAR_MEMORY_LAYOUT_TEMPLATE_FILE, "/etc/agentmem/layout.md"),
+                (VAR_SESSION_BOOTSTRAP_TEMPLATE_FILE, "/etc/muninn/lean.md"),
+                (VAR_MEMORY_LAYOUT_TEMPLATE_FILE, "/etc/muninn/layout.md"),
             ],
         ))
         .unwrap();
         assert_eq!(
             cfg.session_bootstrap_template_file,
-            PathBuf::from("/etc/agentmem/lean.md")
+            PathBuf::from("/etc/muninn/lean.md")
         );
         assert_eq!(
             cfg.memory_layout_template_file,
-            PathBuf::from("/etc/agentmem/layout.md")
+            PathBuf::from("/etc/muninn/layout.md")
         );
     }
 
@@ -1203,8 +1203,8 @@ mod tests {
     #[test]
     fn custom_log_filter_applied() {
         let tmp = TempDir::new().unwrap();
-        let cfg = build(with_root(&tmp, &[(VAR_LOG, "debug,agentmem=trace")])).unwrap();
-        assert_eq!(cfg.log_filter, "debug,agentmem=trace");
+        let cfg = build(with_root(&tmp, &[(VAR_LOG, "debug,muninn=trace")])).unwrap();
+        assert_eq!(cfg.log_filter, "debug,muninn=trace");
     }
 
     #[test]
@@ -1246,14 +1246,14 @@ mod tests {
             &tmp,
             &[(
                 VAR_HTTP_ALLOWED_HOSTS,
-                " agentmem.svc.cluster.local , agentmem.example.com:8000 , ",
+                " muninn.svc.cluster.local , muninn.example.com:8000 , ",
             )],
         ))
         .unwrap();
         match cfg.transport {
             Transport::Http { allowed_hosts, .. } => assert_eq!(
                 allowed_hosts,
-                vec!["agentmem.svc.cluster.local", "agentmem.example.com:8000"]
+                vec!["muninn.svc.cluster.local", "muninn.example.com:8000"]
             ),
             _ => panic!("expected http"),
         }
@@ -1308,7 +1308,7 @@ mod tests {
         }
     }
 
-    // --- AGENTMEM_HTTP_TOKENS_FILE ---------------------------------------
+    // --- MUNINN_HTTP_TOKENS_FILE ---------------------------------------
 
     /// Write a tokens file next to the vault and return its path.
     fn write_tokens(tmp: &TempDir, json: &str) -> String {

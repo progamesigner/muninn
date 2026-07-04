@@ -10,7 +10,7 @@
 
 use std::io::Write as _;
 
-const CHILD_ENV: &str = "AGENTMEM_CRASH_TARGET";
+const CHILD_ENV: &str = "MUNINN_CRASH_TARGET";
 const TEST_NAME: &str = "crash_between_temp_write_and_rename_leaves_target_unchanged";
 
 #[test]

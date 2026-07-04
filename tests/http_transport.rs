@@ -1,6 +1,6 @@
 //! HTTP transport integration tests (tasks 10.5–10.7).
 //!
-//! Each test spawns the real `agentmem` binary as a child process bound to a
+//! Each test spawns the real `muninn` binary as a child process bound to a
 //! loopback (or wildcard) address and drives it over HTTP.
 
 use std::process::Stdio;
@@ -21,30 +21,30 @@ fn spawn(root: &std::path::Path, bind: Option<&str>, bearer: Option<&str>) -> Ch
     spawn_full(root, bind, bearer, None)
 }
 
-/// Like [`spawn`], with an optional `AGENTMEM_HTTP_ALLOWED_HOSTS` value.
+/// Like [`spawn`], with an optional `MUNINN_HTTP_ALLOWED_HOSTS` value.
 fn spawn_full(
     root: &std::path::Path,
     bind: Option<&str>,
     bearer: Option<&str>,
     allowed_hosts: Option<&str>,
 ) -> Child {
-    let bin = env!("CARGO_BIN_EXE_agentmem");
+    let bin = env!("CARGO_BIN_EXE_muninn");
     let mut cmd = Command::new(bin);
-    cmd.env("AGENTMEM_ROOT_DIR", root)
-        .env("AGENTMEM_TRANSPORT", "http")
+    cmd.env("MUNINN_ROOT_DIR", root)
+        .env("MUNINN_TRANSPORT", "http")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     if let Some(b) = bind {
-        cmd.env("AGENTMEM_HTTP_BIND", b);
+        cmd.env("MUNINN_HTTP_BIND", b);
     }
     if let Some(token) = bearer {
-        cmd.env("AGENTMEM_HTTP_BEARER", token);
+        cmd.env("MUNINN_HTTP_BEARER", token);
     }
     if let Some(hosts) = allowed_hosts {
-        cmd.env("AGENTMEM_HTTP_ALLOWED_HOSTS", hosts);
+        cmd.env("MUNINN_HTTP_ALLOWED_HOSTS", hosts);
     }
-    cmd.spawn().expect("spawn agentmem")
+    cmd.spawn().expect("spawn muninn")
 }
 
 /// `POST /mcp` carrying an explicit `Host` header, returning the HTTP status.
@@ -88,26 +88,26 @@ fn write_tokens_file(dir: &assert_fs::TempDir, tokens: serde_json::Value) -> std
     path
 }
 
-/// Like [`spawn_full`], with an `AGENTMEM_HTTP_TOKENS_FILE` path.
+/// Like [`spawn_full`], with an `MUNINN_HTTP_TOKENS_FILE` path.
 fn spawn_scoped(
     root: &std::path::Path,
     bind: &str,
     bearer: Option<&str>,
     tokens_file: &std::path::Path,
 ) -> Child {
-    let bin = env!("CARGO_BIN_EXE_agentmem");
+    let bin = env!("CARGO_BIN_EXE_muninn");
     let mut cmd = Command::new(bin);
-    cmd.env("AGENTMEM_ROOT_DIR", root)
-        .env("AGENTMEM_TRANSPORT", "http")
-        .env("AGENTMEM_HTTP_BIND", bind)
-        .env("AGENTMEM_HTTP_TOKENS_FILE", tokens_file)
+    cmd.env("MUNINN_ROOT_DIR", root)
+        .env("MUNINN_TRANSPORT", "http")
+        .env("MUNINN_HTTP_BIND", bind)
+        .env("MUNINN_HTTP_TOKENS_FILE", tokens_file)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     if let Some(token) = bearer {
-        cmd.env("AGENTMEM_HTTP_BEARER", token);
+        cmd.env("MUNINN_HTTP_BEARER", token);
     }
-    cmd.spawn().expect("spawn agentmem")
+    cmd.spawn().expect("spawn muninn")
 }
 
 /// An MCP client whose every request presents `Authorization: Bearer <token>`.
@@ -162,7 +162,7 @@ fn assert_scope_denied(result: &rmcp::model::CallToolResult, key: &str) {
 #[tokio::test]
 async fn http_default_bind_health_and_mcp_roundtrip() {
     let tmp = assert_fs::TempDir::new().unwrap();
-    // AGENTMEM_ROOT_DIR is the only override → default bind 127.0.0.1:8000.
+    // MUNINN_ROOT_DIR is the only override → default bind 127.0.0.1:8000.
     let mut child = spawn(tmp.path(), None, None);
     let base = "http://127.0.0.1:8000";
 
@@ -368,7 +368,7 @@ async fn http_non_loopback_without_bearer_warns_on_startup() {
 
     let found = tokio::time::timeout(Duration::from_secs(5), async {
         while let Ok(Some(line)) = lines.next_line().await {
-            if line.contains("WARN") && line.contains("AGENTMEM_HTTP_BEARER") {
+            if line.contains("WARN") && line.contains("MUNINN_HTTP_BEARER") {
                 return true;
             }
         }
@@ -378,10 +378,10 @@ async fn http_non_loopback_without_bearer_warns_on_startup() {
     .unwrap_or(false);
 
     child.kill().await.unwrap();
-    assert!(found, "expected a startup WARN naming AGENTMEM_HTTP_BEARER");
+    assert!(found, "expected a startup WARN naming MUNINN_HTTP_BEARER");
 }
 
-// --- Host validation (AGENTMEM_HTTP_ALLOWED_HOSTS) --------------------------
+// --- Host validation (MUNINN_HTTP_ALLOWED_HOSTS) --------------------------
 
 #[tokio::test]
 async fn http_rejects_non_loopback_host_by_default() {
@@ -392,7 +392,7 @@ async fn http_rejects_non_loopback_host_by_default() {
     wait_health(&base).await; // /healthz is not Host-gated.
 
     // Default allow-list is loopback only, so a cluster DNS Host is rejected.
-    let status = mcp_post_status(&base, "agentmem.svc.cluster.local").await;
+    let status = mcp_post_status(&base, "muninn.svc.cluster.local").await;
     assert_eq!(
         status, 403,
         "non-loopback Host should be forbidden by default"
@@ -409,13 +409,13 @@ async fn http_accepts_allowlisted_host() {
         tmp.path(),
         Some(bind),
         None,
-        Some("agentmem.svc.cluster.local"),
+        Some("muninn.svc.cluster.local"),
     );
     let base = format!("http://{bind}");
     wait_health(&base).await;
 
     // The allow-listed Host clears the DNS-rebinding gate (non-403).
-    let status = mcp_post_status(&base, "agentmem.svc.cluster.local").await;
+    let status = mcp_post_status(&base, "muninn.svc.cluster.local").await;
     assert_ne!(status, 403, "allow-listed Host should pass validation");
 
     // A Host outside the list is still rejected.
@@ -488,7 +488,7 @@ async fn context_endpoint_renders_markdown_bootstrap() {
     // and no embedded layout prose.
     assert!(body.contains("# Session Context"));
     assert!(body.contains("<PERSONA>"));
-    assert!(!body.contains("<AGENTMEM:TOOLS>"));
+    assert!(!body.contains("<MUNINN:TOOLS>"));
     assert!(body.contains("session-layout"));
 
     child.kill().await.unwrap();
@@ -641,7 +641,7 @@ async fn bootstrap_endpoint_renders_lean() {
     assert!(body.contains("load_session_context"));
     assert!(body.contains("session-layout"));
     assert!(!body.contains("<MEMORY>"));
-    assert!(!body.contains("<AGENTMEM:TOOLS>"));
+    assert!(!body.contains("<MUNINN:TOOLS>"));
 
     child.kill().await.unwrap();
 }
@@ -699,7 +699,7 @@ async fn layout_endpoint_renders_and_reuses_context_behavior() {
     child.kill().await.unwrap();
 }
 
-// --- Scoped bearer tokens (AGENTMEM_HTTP_TOKENS_FILE) -----------------------
+// --- Scoped bearer tokens (MUNINN_HTTP_TOKENS_FILE) -----------------------
 
 #[tokio::test]
 async fn scoped_token_confined_to_its_grant_on_tools() {
@@ -920,14 +920,14 @@ async fn scoped_token_gates_resource_and_prompt_surfaces() {
     // Resource: own scope renders; a foreign scope is refused with scope_denied.
     let ok = service
         .read_resource(ReadResourceRequestParams::new(
-            "agentmem://session-context/jarvis/tony",
+            "muninn://session-context/jarvis/tony",
         ))
         .await
         .expect("own-scope resource read");
     assert!(!ok.contents.is_empty());
     let err = service
         .read_resource(ReadResourceRequestParams::new(
-            "agentmem://session-context/friday/tony",
+            "muninn://session-context/friday/tony",
         ))
         .await
         .expect_err("foreign-scope resource read must fail");
@@ -1026,10 +1026,7 @@ async fn invalid_tokens_file_fails_startup_without_echoing_tokens() {
         .unwrap();
     assert!(!output.status.success(), "startup must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("AGENTMEM_HTTP_TOKENS_FILE"),
-        "got: {stderr}"
-    );
+    assert!(stderr.contains("MUNINN_HTTP_TOKENS_FILE"), "got: {stderr}");
     assert!(stderr.contains("'tenant'"), "got: {stderr}");
     assert!(!stderr.contains("sup3r-secret"), "token echoed: {stderr}");
 }
@@ -1043,13 +1040,13 @@ async fn print_config_redacts_tokens() {
         json!([ { "token": "sup3r-secret", "scopes": { "agent": "jarvis", "user": "*" } } ]),
     );
 
-    let bin = env!("CARGO_BIN_EXE_agentmem");
+    let bin = env!("CARGO_BIN_EXE_muninn");
     let output = Command::new(bin)
         .arg("--print-config")
-        .env("AGENTMEM_ROOT_DIR", tmp.path())
-        .env("AGENTMEM_TRANSPORT", "http")
-        .env("AGENTMEM_HTTP_TOKENS_FILE", &tokens)
-        .env("AGENTMEM_HTTP_BEARER", "h4rd-secret")
+        .env("MUNINN_ROOT_DIR", tmp.path())
+        .env("MUNINN_TRANSPORT", "http")
+        .env("MUNINN_HTTP_TOKENS_FILE", &tokens)
+        .env("MUNINN_HTTP_BEARER", "h4rd-secret")
         .output()
         .await
         .unwrap();

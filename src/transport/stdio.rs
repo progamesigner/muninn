@@ -7,10 +7,10 @@
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 
-use crate::mcp::AgentmemServer;
+use crate::mcp::MuninnServer;
 
 /// Serve over stdio until stdin closes or a termination signal arrives.
-pub async fn serve(server: AgentmemServer) -> anyhow::Result<()> {
+pub async fn serve(server: MuninnServer) -> anyhow::Result<()> {
     let running = server.serve(stdio()).await?;
     let cancel = running.cancellation_token();
 

@@ -3,39 +3,6 @@
 version = 4
 
 [[package]]
-name = "agentmem"
-version = "0.8.1"
-dependencies = [
- "anyhow",
- "assert_fs",
- "axum",
- "base64",
- "camino",
- "chrono",
- "chrono-tz",
- "clap",
- "criterion",
- "dashmap",
- "globset",
- "ignore",
- "insta",
- "notify",
- "regex",
- "reqwest",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "serde_yaml",
- "tantivy",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1635,6 +1602,39 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "muninn"
+version = "0.8.1"
+dependencies = [
+ "anyhow",
+ "assert_fs",
+ "axum",
+ "base64",
+ "camino",
+ "chrono",
+ "chrono-tz",
+ "clap",
+ "criterion",
+ "dashmap",
+ "globset",
+ "ignore",
+ "insta",
+ "notify",
+ "regex",
+ "reqwest",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tantivy",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

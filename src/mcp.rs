@@ -23,33 +23,33 @@ use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, model::JsonObject};
 
 use crate::config::{Config, Grant};
-use crate::error::AgentmemError;
+use crate::error::MuninnError;
 use crate::storage::Storage;
 use crate::tools::Toolbox;
 
 /// The URI prefix for the session-context resource (note the trailing slash; the
 /// per-scope segments follow it).
-const SESSION_CONTEXT_URI_PREFIX: &str = "agentmem://session-context/";
+const SESSION_CONTEXT_URI_PREFIX: &str = "muninn://session-context/";
 /// The shared name of the session-context resource and prompt.
 const SESSION_CONTEXT_NAME: &str = "session-context";
 /// The URI prefix and name for the lean session-bootstrap resource.
-const SESSION_BOOTSTRAP_URI_PREFIX: &str = "agentmem://session-bootstrap/";
+const SESSION_BOOTSTRAP_URI_PREFIX: &str = "muninn://session-bootstrap/";
 const SESSION_BOOTSTRAP_NAME: &str = "session-bootstrap";
 /// The URI prefix and name for the layout resource.
-const SESSION_LAYOUT_URI_PREFIX: &str = "agentmem://session-layout/";
+const SESSION_LAYOUT_URI_PREFIX: &str = "muninn://session-layout/";
 const SESSION_LAYOUT_NAME: &str = "session-layout";
 
 /// The MCP server handler. Cheap to clone — the shared [`Toolbox`] lives behind an
 /// `Arc`, so the HTTP transport's per-session factory hands out lightweight
 /// clones that all front the same storage layer and locks.
 #[derive(Clone)]
-pub struct AgentmemServer {
+pub struct MuninnServer {
     toolbox: Arc<Toolbox>,
 }
 
-impl AgentmemServer {
+impl MuninnServer {
     /// Build a server from a fully-resolved [`Config`].
-    pub fn new(config: &Config) -> AgentmemServer {
+    pub fn new(config: &Config) -> MuninnServer {
         let storage = Storage::new(
             config.resolver(),
             config.honor_ignore_files,
@@ -76,7 +76,7 @@ impl AgentmemServer {
             config.memory_layout_template_file.clone(),
             recall,
         );
-        AgentmemServer {
+        MuninnServer {
             toolbox: Arc::new(toolbox),
         }
     }
@@ -117,7 +117,7 @@ impl AgentmemServer {
         scope: &BTreeMap<String, String>,
         grant: &Grant,
         kind: crate::session_context::RenderKind,
-    ) -> Result<crate::session_context::SessionContext, AgentmemError> {
+    ) -> Result<crate::session_context::SessionContext, MuninnError> {
         self.toolbox.render_session_context(scope, grant, kind)
     }
 
@@ -128,11 +128,11 @@ impl AgentmemServer {
         &self,
         scope: &BTreeMap<String, String>,
         grant: &Grant,
-    ) -> Result<String, AgentmemError> {
+    ) -> Result<String, MuninnError> {
         self.toolbox.render_layout(scope, grant)
     }
 
-    /// The `agentmem://<prefix>/{k1}/{k2}/…` URI template for the active scheme;
+    /// The `muninn://<prefix>/{k1}/{k2}/…` URI template for the active scheme;
     /// the params follow the scheme's placeholders in order.
     fn uri_template_for(&self, prefix: &str) -> String {
         let params: Vec<String> = self
@@ -210,7 +210,7 @@ impl AgentmemServer {
 
 /// Map a domain error onto a protocol error for the resource/prompt surfaces.
 /// The structured `code` rides in the `data` field so clients can branch on it.
-fn to_mcp_error(err: AgentmemError) -> McpError {
+fn to_mcp_error(err: MuninnError) -> McpError {
     let data = Some(serde_json::json!({ "code": err.code().as_str() }));
     McpError::invalid_params(err.to_string(), data)
 }
@@ -235,7 +235,7 @@ fn request_grant(context: &RequestContext<RoleServer>) -> Grant {
     Grant::AllScopes
 }
 
-impl ServerHandler for AgentmemServer {
+impl ServerHandler for MuninnServer {
     fn get_info(&self) -> ServerInfo {
         // `ServerInfo` is `#[non_exhaustive]`, so it cannot be built with a struct
         // expression here; start from its `Default` (which already sets the protocol

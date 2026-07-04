@@ -9,12 +9,12 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentmem::config::{RecallBackendKind, RecallConfig};
-use agentmem::path::{PathResolver, VirtualPath};
-use agentmem::policy::Region;
-use agentmem::recall::{RecallEngine, RecallQuery};
-use agentmem::scheme::Scheme;
-use agentmem::storage::Storage;
+use muninn::config::{RecallBackendKind, RecallConfig};
+use muninn::path::{PathResolver, VirtualPath};
+use muninn::policy::Region;
+use muninn::recall::{RecallEngine, RecallQuery};
+use muninn::scheme::Scheme;
+use muninn::storage::Storage;
 
 use assert_fs::TempDir;
 use assert_fs::prelude::*;

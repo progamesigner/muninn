@@ -1,10 +1,10 @@
-//! The `agentmem` binary entrypoint: parse configuration, install tracing, build
+//! The `muninn` binary entrypoint: parse configuration, install tracing, build
 //! the MCP server, and serve the selected transport until termination.
 
-use agentmem::config::{Cli, Config};
-use agentmem::mcp::AgentmemServer;
-use agentmem::transport;
 use clap::Parser;
+use muninn::config::{Cli, Config};
+use muninn::mcp::MuninnServer;
+use muninn::transport;
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -13,7 +13,7 @@ fn main() -> anyhow::Result<()> {
         Ok(config) => config,
         Err(err) => {
             // Fail fast with a single human-readable line to stderr.
-            eprintln!("agentmem: {err}");
+            eprintln!("muninn: {err}");
             std::process::exit(1);
         }
     };
@@ -24,12 +24,12 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if let Err(err) = agentmem::telemetry::init(&config.log_filter) {
-        eprintln!("agentmem: failed to initialise logging: {err}");
+    if let Err(err) = muninn::telemetry::init(&config.log_filter) {
+        eprintln!("muninn: failed to initialise logging: {err}");
         std::process::exit(1);
     }
 
-    let server = AgentmemServer::new(&config);
+    let server = MuninnServer::new(&config);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

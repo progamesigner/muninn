@@ -16,7 +16,7 @@ pub enum Region {
     OutsideAgentsFolder,
 }
 
-/// The server-wide policy (`AGENTMEM_POLICY`).
+/// The server-wide policy (`MUNINN_POLICY`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Policy {
     /// Inside: own-scope R+W. Outside: denied.
@@ -38,7 +38,7 @@ pub struct Permission {
 }
 
 /// The reason a policy gate refused an operation, before a virtual path is
-/// attached to form an [`crate::error::AgentmemError`].
+/// attached to form an [`crate::error::MuninnError`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyError {
     /// The region is entirely unreachable under the active policy.

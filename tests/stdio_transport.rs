@@ -1,6 +1,6 @@
 //! Stdio transport integration test (task 9.4).
 //!
-//! Launches the real `agentmem` binary as a child process speaking MCP over
+//! Launches the real `muninn` binary as a child process speaking MCP over
 //! stdio, performs `initialize` + `tools/list` + a `write`→`read` round-trip, and
 //! asserts a clean shutdown. A successful round-trip also proves stdout carries
 //! only well-formed JSON-RPC frames: any stray log byte on stdout would corrupt
@@ -15,13 +15,13 @@ use tokio::process::Command;
 #[tokio::test]
 async fn stdio_initialize_list_and_roundtrip() {
     let tmp = assert_fs::TempDir::new().unwrap();
-    let bin = env!("CARGO_BIN_EXE_agentmem");
+    let bin = env!("CARGO_BIN_EXE_muninn");
 
     let service = ()
         .serve(
             TokioChildProcess::new(Command::new(bin).configure(|cmd| {
-                cmd.env("AGENTMEM_ROOT_DIR", tmp.path());
-                cmd.env("AGENTMEM_TRANSPORT", "stdio");
+                cmd.env("MUNINN_ROOT_DIR", tmp.path());
+                cmd.env("MUNINN_TRANSPORT", "stdio");
             }))
             .unwrap(),
         )
@@ -75,20 +75,20 @@ async fn stdio_initialize_list_and_roundtrip() {
     service.cancel().await.unwrap();
 }
 
-/// `AGENTMEM_HTTP_TOKENS_FILE` is an HTTP-transport variable: under stdio it is
+/// `MUNINN_HTTP_TOKENS_FILE` is an HTTP-transport variable: under stdio it is
 /// ignored entirely — the file is not even read (the path here does not exist)
 /// and no grant enforcement applies, so every scope stays usable.
 #[tokio::test]
 async fn stdio_ignores_tokens_file_and_enforces_no_grants() {
     let tmp = assert_fs::TempDir::new().unwrap();
-    let bin = env!("CARGO_BIN_EXE_agentmem");
+    let bin = env!("CARGO_BIN_EXE_muninn");
 
     let service = ()
         .serve(
             TokioChildProcess::new(Command::new(bin).configure(|cmd| {
-                cmd.env("AGENTMEM_ROOT_DIR", tmp.path());
-                cmd.env("AGENTMEM_TRANSPORT", "stdio");
-                cmd.env("AGENTMEM_HTTP_TOKENS_FILE", "/nonexistent/tokens.json");
+                cmd.env("MUNINN_ROOT_DIR", tmp.path());
+                cmd.env("MUNINN_TRANSPORT", "stdio");
+                cmd.env("MUNINN_HTTP_TOKENS_FILE", "/nonexistent/tokens.json");
             }))
             .unwrap(),
         )

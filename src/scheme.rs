@@ -1,4 +1,4 @@
-//! The VFS scheme (`AGENTMEM_VFS_SCHEME`).
+//! The VFS scheme (`MUNINN_VFS_SCHEME`).
 //!
 //! A scheme is a dotted sequence of literal and `<ident>` placeholder segments.
 //! Each distinct placeholder ident becomes a required scope parameter on every

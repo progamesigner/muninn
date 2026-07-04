@@ -23,7 +23,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::config::Grant;
-use crate::error::AgentmemError;
+use crate::error::MuninnError;
 use crate::path::{PhysicalPath, VirtualPath};
 use crate::policy::{Policy, PolicyError, Region};
 use crate::recall::{FilterOp, PropertyFilter, RecallEngine, RecallQuery};
@@ -370,7 +370,7 @@ struct RecallFields {
     filters: Option<Vec<PropertyFilterField>>,
     /// Include only notes modified at or after this time. Accepts an RFC 3339
     /// timestamp, or a bare `YYYY-MM-DD` date interpreted as start of day in the
-    /// configured `AGENTMEM_TIMEZONE`. Bounds are half-open
+    /// configured `MUNINN_TIMEZONE`. Bounds are half-open
     /// (`modified_after ≤ mtime < modified_before`) and compare the filesystem
     /// mtime, which restores and sync tools may have back-dated. Counts as a
     /// sufficient predicate on its own: with no `query`/`regex`/`filters`, hits
@@ -401,7 +401,7 @@ pub struct Toolbox {
     session_bootstrap_template_file: PathBuf,
     /// Absolute path to the global memory-layout template file (may not exist).
     memory_layout_template_file: PathBuf,
-    /// The recall engine, present unless `AGENTMEM_RECALL_BACKEND=off`.
+    /// The recall engine, present unless `MUNINN_RECALL_BACKEND=off`.
     recall: Option<Arc<RecallEngine>>,
 }
 
@@ -456,9 +456,8 @@ impl Toolbox {
         name: &str,
         args: &JsonObject,
         grant: &Grant,
-    ) -> Option<Result<CallToolResult, AgentmemError>> {
-        let handler: fn(&Toolbox, &JsonObject) -> Result<CallToolResult, AgentmemError> = match name
-        {
+    ) -> Option<Result<CallToolResult, MuninnError>> {
+        let handler: fn(&Toolbox, &JsonObject) -> Result<CallToolResult, MuninnError> = match name {
             "list_memory_notes" => Toolbox::list_memory_notes,
             "read_memory_note" => Toolbox::read_memory_note,
             "read_memory_notes" => Toolbox::read_memory_notes,
@@ -486,7 +485,7 @@ impl Toolbox {
     /// Only well-formed keys are checked here — missing or malformed scope keys
     /// fall through to [`Toolbox::scope_map`]'s own validation and its standard
     /// `missing_scope`/`invalid_argument` errors.
-    fn check_grant(&self, args: &JsonObject, grant: &Grant) -> Result<(), AgentmemError> {
+    fn check_grant(&self, args: &JsonObject, grant: &Grant) -> Result<(), MuninnError> {
         if matches!(grant, Grant::AllScopes) {
             return Ok(());
         }
@@ -523,7 +522,7 @@ impl Toolbox {
         &self,
         args: &JsonObject,
         tool_fields: &[&str],
-    ) -> Result<BTreeMap<String, String>, AgentmemError> {
+    ) -> Result<BTreeMap<String, String>, MuninnError> {
         let placeholders = self.scheme().placeholders();
 
         let mut scope: BTreeMap<String, String> = BTreeMap::new();
@@ -533,17 +532,17 @@ impl Toolbox {
                     scope.insert((*ph).to_string(), s.clone());
                 }
                 Some(Value::String(_)) => {
-                    return Err(AgentmemError::InvalidArgument {
+                    return Err(MuninnError::InvalidArgument {
                         message: format!("scope key '{ph}' must not be empty"),
                     });
                 }
                 Some(_) => {
-                    return Err(AgentmemError::InvalidArgument {
+                    return Err(MuninnError::InvalidArgument {
                         message: format!("scope key '{ph}' must be a string"),
                     });
                 }
                 None => {
-                    return Err(AgentmemError::MissingScope {
+                    return Err(MuninnError::MissingScope {
                         key: (*ph).to_string(),
                     });
                 }
@@ -554,7 +553,7 @@ impl Toolbox {
             let is_scope = placeholders.contains(&key.as_str());
             let is_field = tool_fields.contains(&key.as_str());
             if !is_scope && !is_field {
-                return Err(AgentmemError::InvalidArgument {
+                return Err(MuninnError::InvalidArgument {
                     message: format!("unexpected parameter '{key}'"),
                 });
             }
@@ -568,11 +567,11 @@ impl Toolbox {
         &self,
         args: &JsonObject,
         tool_fields: &[&str],
-    ) -> Result<String, AgentmemError> {
+    ) -> Result<String, MuninnError> {
         let scope = self.scope_map(args, tool_fields)?;
         self.scheme()
             .render(&scope)
-            .map_err(|e| AgentmemError::InvalidArgument {
+            .map_err(|e| MuninnError::InvalidArgument {
                 message: e.to_string(),
             })
     }
@@ -600,7 +599,7 @@ impl Toolbox {
         scope: &BTreeMap<String, String>,
         grant: &Grant,
         kind: crate::session_context::RenderKind,
-    ) -> Result<crate::session_context::SessionContext, AgentmemError> {
+    ) -> Result<crate::session_context::SessionContext, MuninnError> {
         self.check_render_scope(scope, grant)?;
         let template_file = match kind {
             crate::session_context::RenderKind::Context => &self.session_context_template_file,
@@ -616,7 +615,7 @@ impl Toolbox {
         &self,
         scope: &BTreeMap<String, String>,
         grant: &Grant,
-    ) -> Result<String, AgentmemError> {
+    ) -> Result<String, MuninnError> {
         self.check_render_scope(scope, grant)?;
         crate::session_context::render_layout(
             &self.storage,
@@ -632,18 +631,18 @@ impl Toolbox {
         &self,
         scope: &BTreeMap<String, String>,
         grant: &Grant,
-    ) -> Result<(), AgentmemError> {
+    ) -> Result<(), MuninnError> {
         let placeholders = self.scheme().placeholders();
         for ph in &placeholders {
             match scope.get(*ph) {
                 Some(v) if !v.is_empty() => {}
                 Some(_) => {
-                    return Err(AgentmemError::InvalidArgument {
+                    return Err(MuninnError::InvalidArgument {
                         message: format!("scope key '{ph}' must not be empty"),
                     });
                 }
                 None => {
-                    return Err(AgentmemError::MissingScope {
+                    return Err(MuninnError::MissingScope {
                         key: (*ph).to_string(),
                     });
                 }
@@ -651,7 +650,7 @@ impl Toolbox {
         }
         for key in scope.keys() {
             if !placeholders.contains(&key.as_str()) {
-                return Err(AgentmemError::InvalidArgument {
+                return Err(MuninnError::InvalidArgument {
                     message: format!("unexpected scope key '{key}'"),
                 });
             }
@@ -663,7 +662,7 @@ impl Toolbox {
     /// The clean virtual path of a conventional file relative to the agents
     /// folder (e.g. `Agents/PERSONA.md`, or `PERSONA.md` when the agents folder is
     /// the vault root).
-    fn agents_vpath(&self, relative: &str) -> Result<VirtualPath, AgentmemError> {
+    fn agents_vpath(&self, relative: &str) -> Result<VirtualPath, MuninnError> {
         let agents = self.storage.resolver().agents_dir();
         let full = if agents.as_str().is_empty() {
             relative.to_string()
@@ -678,7 +677,7 @@ impl Toolbox {
     /// (`evolve_core_persona`, `update_task_heartbeat`); the returned error
     /// carries `path_not_permitted` and names the wrapper to use. A no-op for
     /// subfolder paths and for paths outside the agents folder.
-    fn reject_if_root_reserved(&self, vpath: &VirtualPath) -> Result<(), AgentmemError> {
+    fn reject_if_root_reserved(&self, vpath: &VirtualPath) -> Result<(), MuninnError> {
         if !self.storage.resolver().is_agents_root_level(vpath) {
             return Ok(());
         }
@@ -691,7 +690,7 @@ impl Toolbox {
         } else {
             "evolve_core_persona"
         };
-        Err(AgentmemError::RootPathReserved {
+        Err(MuninnError::RootPathReserved {
             virtual_path: vpath.as_str().to_string(),
             wrapper,
         })
@@ -706,7 +705,7 @@ impl Toolbox {
         scope: &str,
         vpath: &VirtualPath,
         content: &str,
-    ) -> Result<String, AgentmemError> {
+    ) -> Result<String, MuninnError> {
         if self.scheme().is_empty() {
             return Ok(content.to_string());
         }
@@ -734,7 +733,7 @@ impl Toolbox {
         scope: &str,
         vpath: &VirtualPath,
         value: &Value,
-    ) -> Result<Value, AgentmemError> {
+    ) -> Result<Value, MuninnError> {
         if self.scheme().is_empty() {
             return Ok(value.clone());
         }
@@ -755,12 +754,12 @@ impl Toolbox {
     }
 
     /// Map a [`PolicyError`] to the appropriate boundary error for `vpath`.
-    fn policy_err(err: PolicyError, vpath: &VirtualPath) -> AgentmemError {
+    fn policy_err(err: PolicyError, vpath: &VirtualPath) -> MuninnError {
         match err {
-            PolicyError::NotPermitted => AgentmemError::PathNotPermitted {
+            PolicyError::NotPermitted => MuninnError::PathNotPermitted {
                 virtual_path: vpath.as_str().to_string(),
             },
-            PolicyError::WriteDenied => AgentmemError::WriteDenied {
+            PolicyError::WriteDenied => MuninnError::WriteDenied {
                 virtual_path: vpath.as_str().to_string(),
             },
         }
@@ -768,7 +767,7 @@ impl Toolbox {
 
     // --- handlers ---
 
-    fn list_memory_notes(&self, args: &JsonObject) -> Result<CallToolResult, AgentmemError> {
+    fn list_memory_notes(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
         let scope = self.resolve_scope(
             args,
             &["path_prefix", "glob", "order", "limit", "cursor", "view"],
@@ -778,7 +777,7 @@ impl Toolbox {
             None | Some("files") => ListView::Files,
             Some("dirs") => ListView::Dirs,
             Some(other) => {
-                return Err(AgentmemError::InvalidArgument {
+                return Err(MuninnError::InvalidArgument {
                     message: format!("view must be \"files\" or \"dirs\", got {other:?}"),
                 });
             }
@@ -788,7 +787,7 @@ impl Toolbox {
             None | Some("name_asc") => ListOrder::NameAsc,
             Some("name_desc") => ListOrder::NameDesc,
             Some(other) => {
-                return Err(AgentmemError::InvalidArgument {
+                return Err(MuninnError::InvalidArgument {
                     message: format!("order must be \"name_asc\" or \"name_desc\", got {other:?}"),
                 });
             }
@@ -798,7 +797,7 @@ impl Toolbox {
         let glob = match opt_str(args, "glob")? {
             Some(pattern) => Some(
                 globset::Glob::new(&pattern)
-                    .map_err(|e| AgentmemError::InvalidArgument {
+                    .map_err(|e| MuninnError::InvalidArgument {
                         message: format!("invalid glob: {e}"),
                     })?
                     .compile_matcher(),
@@ -807,7 +806,7 @@ impl Toolbox {
         };
         let limit = match opt_u64(args, "limit")? {
             Some(n) if n > MAX_LIMIT => {
-                return Err(AgentmemError::InvalidArgument {
+                return Err(MuninnError::InvalidArgument {
                     message: format!("limit must not exceed {MAX_LIMIT}"),
                 });
             }
@@ -884,7 +883,7 @@ impl Toolbox {
     /// Gate and read one note's stored bytes for `scope`: policy gate by region,
     /// suffix resolution, visibility check, read — no link transform. Shared by
     /// every reader so their gating cannot drift.
-    fn read_raw(&self, scope: &str, vpath: &VirtualPath) -> Result<String, AgentmemError> {
+    fn read_raw(&self, scope: &str, vpath: &VirtualPath) -> Result<String, MuninnError> {
         let resolver = self.storage.resolver();
         let region = resolver.detect_region(vpath);
         self.policy
@@ -892,7 +891,7 @@ impl Toolbox {
             .map_err(|e| Self::policy_err(e, vpath))?;
         let physical = resolver.resolve(scope, vpath)?;
         if !self.storage.is_visible(&physical) {
-            return Err(AgentmemError::PathNotPermitted {
+            return Err(MuninnError::PathNotPermitted {
                 virtual_path: vpath.as_str().to_string(),
             });
         }
@@ -902,7 +901,7 @@ impl Toolbox {
     /// Read one note for `scope` with full single-read semantics: [`Self::read_raw`]
     /// plus the own-suffix link strip. Shared by `read_memory_note` and
     /// `read_memory_notes` so the two cannot drift.
-    fn read_one(&self, scope: &str, vpath: &VirtualPath) -> Result<String, AgentmemError> {
+    fn read_one(&self, scope: &str, vpath: &VirtualPath) -> Result<String, MuninnError> {
         Ok(self.strip_links_for(scope, &self.read_raw(scope, vpath)?))
     }
 
@@ -917,7 +916,7 @@ impl Toolbox {
         scope: &str,
         vpath: &VirtualPath,
         range: Option<LineRange>,
-    ) -> Result<(String, Option<u64>), AgentmemError> {
+    ) -> Result<(String, Option<u64>), MuninnError> {
         let content = self.read_one(scope, vpath)?;
         Ok(match range {
             Some(range) => {
@@ -928,7 +927,7 @@ impl Toolbox {
         })
     }
 
-    fn read_memory_note(&self, args: &JsonObject) -> Result<CallToolResult, AgentmemError> {
+    fn read_memory_note(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
         let scope = self.resolve_scope(args, &["path", "backlinks", "offset", "limit"])?;
         let vpath = VirtualPath::new(&require_str(args, "path")?)?;
         let want_backlinks = opt_bool(args, "backlinks")?.unwrap_or(false);
@@ -946,7 +945,7 @@ impl Toolbox {
         Ok(result)
     }
 
-    fn read_memory_notes(&self, args: &JsonObject) -> Result<CallToolResult, AgentmemError> {
+    fn read_memory_notes(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
         let scope = self.resolve_scope(args, &["paths"])?;
         let entries = match args.get("paths") {
             Some(Value::Array(items)) => items
@@ -954,23 +953,23 @@ impl Toolbox {
                 .map(parse_batch_entry)
                 .collect::<Result<Vec<_>, _>>()?,
             Some(_) => {
-                return Err(AgentmemError::InvalidArgument {
+                return Err(MuninnError::InvalidArgument {
                     message: "argument 'paths' must be an array".to_string(),
                 });
             }
             None => {
-                return Err(AgentmemError::InvalidArgument {
+                return Err(MuninnError::InvalidArgument {
                     message: "missing required argument 'paths'".to_string(),
                 });
             }
         };
         if entries.is_empty() {
-            return Err(AgentmemError::InvalidArgument {
+            return Err(MuninnError::InvalidArgument {
                 message: "argument 'paths' must contain at least one path".to_string(),
             });
         }
         if entries.len() > MAX_BATCH_READ {
-            return Err(AgentmemError::InvalidArgument {
+            return Err(MuninnError::InvalidArgument {
                 message: format!("argument 'paths' must not exceed {MAX_BATCH_READ} entries"),
             });
         }
@@ -1002,7 +1001,7 @@ impl Toolbox {
         &self,
         scope: &str,
         vpath: &VirtualPath,
-    ) -> Result<Vec<String>, AgentmemError> {
+    ) -> Result<Vec<String>, MuninnError> {
         let target_clean = vpath.as_str().strip_suffix(".md").unwrap_or(vpath.as_str());
         let resolver = self.storage.resolver();
         let regions = self.policy.list_visible_regions(self.scheme().is_empty());
@@ -1020,7 +1019,7 @@ impl Toolbox {
         Ok(backlinks.into_iter().collect())
     }
 
-    fn write_memory_note(&self, args: &JsonObject) -> Result<CallToolResult, AgentmemError> {
+    fn write_memory_note(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
         let scope = self.resolve_scope(args, &["path", "content", "append"])?;
         let vpath = VirtualPath::new(&require_str(args, "path")?)?;
         let content = require_str(args, "content")?;
@@ -1056,28 +1055,28 @@ impl Toolbox {
     /// request order. Each applied entry is atomic and indexed synchronously,
     /// but the batch is not transactional across entries: a failure or crash
     /// mid-apply leaves a clean prefix of the batch applied.
-    fn write_memory_notes(&self, args: &JsonObject) -> Result<CallToolResult, AgentmemError> {
+    fn write_memory_notes(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
         let scope = self.resolve_scope(args, &["notes"])?;
         let raw_entries = match args.get("notes") {
             Some(Value::Array(items)) => items,
             Some(_) => {
-                return Err(AgentmemError::InvalidArgument {
+                return Err(MuninnError::InvalidArgument {
                     message: "argument 'notes' must be an array".to_string(),
                 });
             }
             None => {
-                return Err(AgentmemError::InvalidArgument {
+                return Err(MuninnError::InvalidArgument {
                     message: "missing required argument 'notes'".to_string(),
                 });
             }
         };
         if raw_entries.is_empty() {
-            return Err(AgentmemError::InvalidArgument {
+            return Err(MuninnError::InvalidArgument {
                 message: "argument 'notes' must contain at least one entry".to_string(),
             });
         }
         if raw_entries.len() > MAX_BATCH_WRITE {
-            return Err(AgentmemError::InvalidArgument {
+            return Err(MuninnError::InvalidArgument {
                 message: format!("argument 'notes' must not exceed {MAX_BATCH_WRITE} entries"),
             });
         }
@@ -1091,7 +1090,7 @@ impl Toolbox {
             let (path, content, append) = parse_batch_write_entry(raw)?;
             let vpath = VirtualPath::new(&path)?;
             if !seen.insert(vpath.as_str().to_string()) {
-                return Err(AgentmemError::InvalidArgument {
+                return Err(MuninnError::InvalidArgument {
                     message: format!("duplicate path '{}' in 'notes'", vpath.as_str()),
                 });
             }
@@ -1135,7 +1134,7 @@ impl Toolbox {
             };
             let physical = resolver.resolve(&scope, &vpath)?;
             if !self.storage.is_visible(&physical) {
-                return Err(AgentmemError::PathNotPermitted {
+                return Err(MuninnError::PathNotPermitted {
                     virtual_path: vpath.as_str().to_string(),
                 });
             }
@@ -1163,7 +1162,7 @@ impl Toolbox {
         Ok(ok_json(json!({ "results": results })))
     }
 
-    fn edit_memory_note(&self, args: &JsonObject) -> Result<CallToolResult, AgentmemError> {
+    fn edit_memory_note(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
         let scope = self.resolve_scope(args, &["path", "search_string", "replace_string"])?;
         let vpath = VirtualPath::new(&require_str(args, "path")?)?;
         let search = require_str(args, "search_string")?;
@@ -1180,7 +1179,7 @@ impl Toolbox {
         let resolver = self.storage.resolver();
         let physical = resolver.resolve(&scope, &vpath)?;
         if !self.storage.is_visible(&physical) {
-            return Err(AgentmemError::PathNotPermitted {
+            return Err(MuninnError::PathNotPermitted {
                 virtual_path: vpath.as_str().to_string(),
             });
         }
@@ -1191,7 +1190,7 @@ impl Toolbox {
         Ok(ok_json(json!({ "chars_replaced": replaced })))
     }
 
-    fn delete_memory_note(&self, args: &JsonObject) -> Result<CallToolResult, AgentmemError> {
+    fn delete_memory_note(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
         let scope = self.resolve_scope(args, &["path"])?;
         let vpath = VirtualPath::new(&require_str(args, "path")?)?;
         self.reject_if_root_reserved(&vpath)?;
@@ -1202,7 +1201,7 @@ impl Toolbox {
             .map_err(|e| Self::policy_err(e, &vpath))?;
         let physical = resolver.resolve(&scope, &vpath)?;
         if !self.storage.is_visible(&physical) {
-            return Err(AgentmemError::PathNotPermitted {
+            return Err(MuninnError::PathNotPermitted {
                 virtual_path: vpath.as_str().to_string(),
             });
         }
@@ -1215,7 +1214,7 @@ impl Toolbox {
     /// computes every rewritten content with no writes; phase 2 then mutates in
     /// the order destination → referrers → source, so a crash mid-flight leaves
     /// both copies present and never a dangling reference.
-    fn rename_memory_note(&self, args: &JsonObject) -> Result<CallToolResult, AgentmemError> {
+    fn rename_memory_note(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
         let scope = self.resolve_scope(args, &["path", "new_path"])?;
         let vpath = VirtualPath::new(&require_str(args, "path")?)?;
         let new_vpath = VirtualPath::new(&require_str(args, "new_path")?)?;
@@ -1238,7 +1237,7 @@ impl Toolbox {
 
         let src_physical = resolver.resolve(&scope, &vpath)?;
         if !self.storage.is_visible(&src_physical) {
-            return Err(AgentmemError::PathNotPermitted {
+            return Err(MuninnError::PathNotPermitted {
                 virtual_path: vpath.as_str().to_string(),
             });
         }
@@ -1246,12 +1245,12 @@ impl Toolbox {
 
         let dest_physical = resolver.resolve(&scope, &new_vpath)?;
         if !self.storage.is_visible(&dest_physical) {
-            return Err(AgentmemError::PathNotPermitted {
+            return Err(MuninnError::PathNotPermitted {
                 virtual_path: new_vpath.as_str().to_string(),
             });
         }
         if dest_physical.as_path().exists() {
-            return Err(AgentmemError::DestinationExists {
+            return Err(MuninnError::DestinationExists {
                 virtual_path: new_vpath.as_str().to_string(),
             });
         }
@@ -1339,7 +1338,7 @@ impl Toolbox {
         })))
     }
 
-    fn read_note_properties(&self, args: &JsonObject) -> Result<CallToolResult, AgentmemError> {
+    fn read_note_properties(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
         let scope = self.resolve_scope(args, &["path"])?;
         let vpath = VirtualPath::new(&require_str(args, "path")?)?;
         // Parse the stored bytes, then strip the caller's own suffix from the
@@ -1352,7 +1351,7 @@ impl Toolbox {
         ))
     }
 
-    fn update_note_properties(&self, args: &JsonObject) -> Result<CallToolResult, AgentmemError> {
+    fn update_note_properties(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
         let scope = self.resolve_scope(args, &["path", "properties"])?;
         let vpath = VirtualPath::new(&require_str(args, "path")?)?;
         let updates = require_object(args, "properties")?;
@@ -1363,7 +1362,7 @@ impl Toolbox {
             .map_err(|e| Self::policy_err(e, &vpath))?;
         let physical = self.storage.resolver().resolve(&scope, &vpath)?;
         if !self.storage.is_visible(&physical) {
-            return Err(AgentmemError::PathNotPermitted {
+            return Err(MuninnError::PathNotPermitted {
                 virtual_path: vpath.as_str().to_string(),
             });
         }
@@ -1375,7 +1374,7 @@ impl Toolbox {
         let updates = Value::Object(updates);
         let mut merged = Value::Object(Map::new());
         self.storage.read_modify_write(&physical, |current| {
-            let existing = current.ok_or_else(|| AgentmemError::NotFound {
+            let existing = current.ok_or_else(|| MuninnError::NotFound {
                 virtual_path: vpath.as_str().to_string(),
             })?;
             let Value::Object(expanded) = self.expand_value_links_for(&scope, &vpath, &updates)?
@@ -1383,7 +1382,7 @@ impl Toolbox {
                 unreachable!("expanding an object yields an object");
             };
             let next = crate::frontmatter::merge(&existing, &expanded).map_err(|e| {
-                AgentmemError::InvalidArgument {
+                MuninnError::InvalidArgument {
                     message: e.to_string(),
                 }
             })?;
@@ -1398,7 +1397,7 @@ impl Toolbox {
         ))
     }
 
-    fn load_session_context(&self, args: &JsonObject) -> Result<CallToolResult, AgentmemError> {
+    fn load_session_context(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
         // Accept only scope parameters (no `path`/`which`). Always the full
         // context render; the scope grant is enforced at the call dispatch.
         let scope = self.scope_map(args, &[])?;
@@ -1418,17 +1417,17 @@ impl Toolbox {
     /// validates every entry (which domain, duplicates, line caps, link
     /// expansion, policy, visibility) before writing any file, then applies in
     /// request order. Exactly one of the two forms must be supplied.
-    fn evolve_core_persona(&self, args: &JsonObject) -> Result<CallToolResult, AgentmemError> {
+    fn evolve_core_persona(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
         let scope = self.resolve_scope(args, &["which", "content", "updates"])?;
         let has_single = args.contains_key("which") || args.contains_key("content");
         let has_batch = args.contains_key("updates");
         if has_single && has_batch {
-            return Err(AgentmemError::InvalidArgument {
+            return Err(MuninnError::InvalidArgument {
                 message: "supply either 'which'/'content' or 'updates', not both".to_string(),
             });
         }
         if !has_single && !has_batch {
-            return Err(AgentmemError::InvalidArgument {
+            return Err(MuninnError::InvalidArgument {
                 message: "supply either 'which' and 'content', or an 'updates' array".to_string(),
             });
         }
@@ -1447,19 +1446,19 @@ impl Toolbox {
         let raw_updates = match args.get("updates") {
             Some(Value::Array(items)) => items,
             Some(_) => {
-                return Err(AgentmemError::InvalidArgument {
+                return Err(MuninnError::InvalidArgument {
                     message: "argument 'updates' must be an array".to_string(),
                 });
             }
             None => unreachable!("has_batch checked above"),
         };
         if raw_updates.is_empty() {
-            return Err(AgentmemError::InvalidArgument {
+            return Err(MuninnError::InvalidArgument {
                 message: "argument 'updates' must contain at least one entry".to_string(),
             });
         }
         if raw_updates.len() > MAX_BATCH_EVOLVE {
-            return Err(AgentmemError::InvalidArgument {
+            return Err(MuninnError::InvalidArgument {
                 message: format!("argument 'updates' must not exceed {MAX_BATCH_EVOLVE} entries"),
             });
         }
@@ -1473,7 +1472,7 @@ impl Toolbox {
             let (which, content) = parse_evolve_update_entry(raw)?;
             let (filename, line_cap) = evolve_target(&which)?;
             if !seen.insert(filename) {
-                return Err(AgentmemError::InvalidArgument {
+                return Err(MuninnError::InvalidArgument {
                     message: format!("duplicate which '{which}' in 'updates'"),
                 });
             }
@@ -1485,7 +1484,7 @@ impl Toolbox {
                 .map_err(|e| Self::policy_err(e, &vpath))?;
             let physical = resolver.resolve(&scope, &vpath)?;
             if !self.storage.is_visible(&physical) {
-                return Err(AgentmemError::PathNotPermitted {
+                return Err(MuninnError::PathNotPermitted {
                     virtual_path: vpath.as_str().to_string(),
                 });
             }
@@ -1511,11 +1510,11 @@ impl Toolbox {
         filename: &'static str,
         line_cap: Option<usize>,
         content: &str,
-    ) -> Result<(VirtualPath, String), AgentmemError> {
+    ) -> Result<(VirtualPath, String), MuninnError> {
         if let Some(cap) = line_cap {
             let lines = content.lines().count();
             if lines > cap {
-                return Err(AgentmemError::InvalidArgument {
+                return Err(MuninnError::InvalidArgument {
                     message: format!(
                         "{filename} must not exceed {cap} lines (got {lines}); file left unchanged"
                     ),
@@ -1530,7 +1529,7 @@ impl Toolbox {
         Ok((vpath, content))
     }
 
-    fn update_task_heartbeat(&self, args: &JsonObject) -> Result<CallToolResult, AgentmemError> {
+    fn update_task_heartbeat(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
         let scope = self.resolve_scope(args, &["content"])?;
         let content = require_str(args, "content")?;
         let vpath = self.agents_vpath("HEARTBEAT.md")?;
@@ -1540,11 +1539,11 @@ impl Toolbox {
         })
     }
 
-    fn append_diary_entry(&self, args: &JsonObject) -> Result<CallToolResult, AgentmemError> {
+    fn append_diary_entry(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
         let scope = self.resolve_scope(args, &["content", "title"])?;
         let content = require_str(args, "content")?;
         if content.is_empty() {
-            return Err(AgentmemError::InvalidArgument {
+            return Err(MuninnError::InvalidArgument {
                 message: "content must not be empty".to_string(),
             });
         }
@@ -1566,7 +1565,7 @@ impl Toolbox {
         let resolver = self.storage.resolver();
         let physical = resolver.resolve(&scope, &vpath)?;
         if !self.storage.is_visible(&physical) {
-            return Err(AgentmemError::PathNotPermitted {
+            return Err(MuninnError::PathNotPermitted {
                 virtual_path: vpath.as_str().to_string(),
             });
         }
@@ -1585,8 +1584,8 @@ impl Toolbox {
         &self,
         scope: &str,
         vpath: &VirtualPath,
-        op: impl FnOnce(&crate::path::PhysicalPath, &Storage) -> Result<usize, AgentmemError>,
-    ) -> Result<CallToolResult, AgentmemError> {
+        op: impl FnOnce(&crate::path::PhysicalPath, &Storage) -> Result<usize, MuninnError>,
+    ) -> Result<CallToolResult, MuninnError> {
         let resolver = self.storage.resolver();
         let region = resolver.detect_region(vpath);
         self.policy
@@ -1594,7 +1593,7 @@ impl Toolbox {
             .map_err(|e| Self::policy_err(e, vpath))?;
         let physical = resolver.resolve(scope, vpath)?;
         if !self.storage.is_visible(&physical) {
-            return Err(AgentmemError::PathNotPermitted {
+            return Err(MuninnError::PathNotPermitted {
                 virtual_path: vpath.as_str().to_string(),
             });
         }
@@ -1603,7 +1602,7 @@ impl Toolbox {
         Ok(ok_json(json!({ "bytes_written": written })))
     }
 
-    fn recall_memory_notes(&self, args: &JsonObject) -> Result<CallToolResult, AgentmemError> {
+    fn recall_memory_notes(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
         let engine = self
             .recall
             .as_ref()
@@ -1634,7 +1633,7 @@ impl Toolbox {
             && modified_after.is_none()
             && modified_before.is_none()
         {
-            return Err(AgentmemError::InvalidArgument {
+            return Err(MuninnError::InvalidArgument {
                 message: "at least one of query, regex, filters, modified_after, or \
                           modified_before is required"
                     .to_string(),
@@ -1642,7 +1641,7 @@ impl Toolbox {
         }
         let limit = match opt_u64(args, "limit")? {
             Some(n) if n > MAX_LIMIT => {
-                return Err(AgentmemError::InvalidArgument {
+                return Err(MuninnError::InvalidArgument {
                     message: format!("limit must not exceed {MAX_LIMIT}"),
                 });
             }
@@ -1687,12 +1686,12 @@ impl Toolbox {
 }
 
 /// Parse the optional `filters` argument into [`PropertyFilter`]s.
-fn parse_filters(args: &JsonObject) -> Result<Vec<PropertyFilter>, AgentmemError> {
+fn parse_filters(args: &JsonObject) -> Result<Vec<PropertyFilter>, MuninnError> {
     let raw = match args.get("filters") {
         None | Some(Value::Null) => return Ok(Vec::new()),
         Some(Value::Array(a)) => a,
         Some(_) => {
-            return Err(AgentmemError::InvalidArgument {
+            return Err(MuninnError::InvalidArgument {
                 message: "argument 'filters' must be an array".to_string(),
             });
         }
@@ -1701,13 +1700,13 @@ fn parse_filters(args: &JsonObject) -> Result<Vec<PropertyFilter>, AgentmemError
     for item in raw {
         let obj = item
             .as_object()
-            .ok_or_else(|| AgentmemError::InvalidArgument {
+            .ok_or_else(|| MuninnError::InvalidArgument {
                 message: "each filter must be an object with 'key' and 'op'".to_string(),
             })?;
         let key = match obj.get("key") {
             Some(Value::String(s)) if !s.is_empty() => s.clone(),
             _ => {
-                return Err(AgentmemError::InvalidArgument {
+                return Err(MuninnError::InvalidArgument {
                     message: "each filter must have a non-empty string 'key'".to_string(),
                 });
             }
@@ -1721,7 +1720,7 @@ fn parse_filters(args: &JsonObject) -> Result<Vec<PropertyFilter>, AgentmemError
             Some("ge") => FilterOp::Ge,
             Some("le") => FilterOp::Le,
             _ => {
-                return Err(AgentmemError::InvalidArgument {
+                return Err(MuninnError::InvalidArgument {
                     message: "filter 'op' must be one of exists|eq|contains|gt|lt|ge|le"
                         .to_string(),
                 });
@@ -1731,7 +1730,7 @@ fn parse_filters(args: &JsonObject) -> Result<Vec<PropertyFilter>, AgentmemError
             None | Some(Value::Null) => None,
             Some(Value::String(s)) => Some(s.clone()),
             Some(_) => {
-                return Err(AgentmemError::InvalidArgument {
+                return Err(MuninnError::InvalidArgument {
                     message: "filter 'value' must be a string".to_string(),
                 });
             }
@@ -1754,13 +1753,13 @@ fn ok_json(value: Value) -> CallToolResult {
 
 /// Require a string argument, erroring with `invalid_argument` when absent or of
 /// the wrong type.
-fn require_str(args: &JsonObject, key: &str) -> Result<String, AgentmemError> {
+fn require_str(args: &JsonObject, key: &str) -> Result<String, MuninnError> {
     match args.get(key) {
         Some(Value::String(s)) => Ok(s.clone()),
-        Some(_) => Err(AgentmemError::InvalidArgument {
+        Some(_) => Err(MuninnError::InvalidArgument {
             message: format!("argument '{key}' must be a string"),
         }),
-        None => Err(AgentmemError::InvalidArgument {
+        None => Err(MuninnError::InvalidArgument {
             message: format!("missing required argument '{key}'"),
         }),
     }
@@ -1768,33 +1767,33 @@ fn require_str(args: &JsonObject, key: &str) -> Result<String, AgentmemError> {
 
 /// Require a JSON-object argument, erroring with `invalid_argument` when absent
 /// or of the wrong type.
-fn require_object(args: &JsonObject, key: &str) -> Result<Map<String, Value>, AgentmemError> {
+fn require_object(args: &JsonObject, key: &str) -> Result<Map<String, Value>, MuninnError> {
     match args.get(key) {
         Some(Value::Object(o)) => Ok(o.clone()),
-        Some(_) => Err(AgentmemError::InvalidArgument {
+        Some(_) => Err(MuninnError::InvalidArgument {
             message: format!("argument '{key}' must be an object"),
         }),
-        None => Err(AgentmemError::InvalidArgument {
+        None => Err(MuninnError::InvalidArgument {
             message: format!("missing required argument '{key}'"),
         }),
     }
 }
 
-fn opt_str(args: &JsonObject, key: &str) -> Result<Option<String>, AgentmemError> {
+fn opt_str(args: &JsonObject, key: &str) -> Result<Option<String>, MuninnError> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) => Ok(Some(s.clone())),
-        Some(_) => Err(AgentmemError::InvalidArgument {
+        Some(_) => Err(MuninnError::InvalidArgument {
             message: format!("argument '{key}' must be a string"),
         }),
     }
 }
 
-fn opt_bool(args: &JsonObject, key: &str) -> Result<Option<bool>, AgentmemError> {
+fn opt_bool(args: &JsonObject, key: &str) -> Result<Option<bool>, MuninnError> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Bool(b)) => Ok(Some(*b)),
-        Some(_) => Err(AgentmemError::InvalidArgument {
+        Some(_) => Err(MuninnError::InvalidArgument {
             message: format!("argument '{key}' must be a boolean"),
         }),
     }
@@ -1802,11 +1801,7 @@ fn opt_bool(args: &JsonObject, key: &str) -> Result<Option<bool>, AgentmemError>
 
 /// Parse an optional `modified_after`/`modified_before` argument via
 /// [`parse_time_bound`].
-fn opt_time_bound(
-    args: &JsonObject,
-    key: &str,
-    tz: Tz,
-) -> Result<Option<SystemTime>, AgentmemError> {
+fn opt_time_bound(args: &JsonObject, key: &str, tz: Tz) -> Result<Option<SystemTime>, MuninnError> {
     match opt_str(args, key)? {
         Some(raw) => Ok(Some(parse_time_bound(key, &raw, tz)?)),
         None => Ok(None),
@@ -1816,7 +1811,7 @@ fn opt_time_bound(
 /// Parse a time bound: an RFC 3339 timestamp, or a bare `YYYY-MM-DD` date
 /// resolved to start of day in the configured timezone. Anything else is
 /// `invalid_argument`.
-fn parse_time_bound(key: &str, raw: &str, tz: Tz) -> Result<SystemTime, AgentmemError> {
+fn parse_time_bound(key: &str, raw: &str, tz: Tz) -> Result<SystemTime, MuninnError> {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
         return Ok(dt.into());
     }
@@ -1833,24 +1828,24 @@ fn parse_time_bound(key: &str, raw: &str, tz: Tz) -> Result<SystemTime, Agentmem
             return Ok(dt.into());
         }
     }
-    Err(AgentmemError::InvalidArgument {
+    Err(MuninnError::InvalidArgument {
         message: format!(
             "argument '{key}' must be an RFC 3339 timestamp or a YYYY-MM-DD date, got {raw:?}"
         ),
     })
 }
 
-fn opt_u64(args: &JsonObject, key: &str) -> Result<Option<u64>, AgentmemError> {
+fn opt_u64(args: &JsonObject, key: &str) -> Result<Option<u64>, MuninnError> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Number(n)) => {
             n.as_u64()
                 .map(Some)
-                .ok_or_else(|| AgentmemError::InvalidArgument {
+                .ok_or_else(|| MuninnError::InvalidArgument {
                     message: format!("argument '{key}' must be a non-negative integer"),
                 })
         }
-        Some(_) => Err(AgentmemError::InvalidArgument {
+        Some(_) => Err(MuninnError::InvalidArgument {
             message: format!("argument '{key}' must be an integer"),
         }),
     }
@@ -1868,9 +1863,9 @@ struct LineRange {
 /// Parse an optional positive integer, rejecting `0` with `invalid_argument`
 /// (schema-level `minimum` keywords are not enforced server-side for all
 /// clients).
-fn opt_positive(args: &JsonObject, key: &str) -> Result<Option<u64>, AgentmemError> {
+fn opt_positive(args: &JsonObject, key: &str) -> Result<Option<u64>, MuninnError> {
     match opt_u64(args, key)? {
-        Some(0) => Err(AgentmemError::InvalidArgument {
+        Some(0) => Err(MuninnError::InvalidArgument {
             message: format!("argument '{key}' must be a positive integer"),
         }),
         other => Ok(other),
@@ -1880,7 +1875,7 @@ fn opt_positive(args: &JsonObject, key: &str) -> Result<Option<u64>, AgentmemErr
 /// Extract the optional `offset`/`limit` line range from `args`. Returns `None`
 /// when neither is supplied — the whole-note read, whose response must stay
 /// byte-identical to prior behavior.
-fn opt_line_range(args: &JsonObject) -> Result<Option<LineRange>, AgentmemError> {
+fn opt_line_range(args: &JsonObject) -> Result<Option<LineRange>, MuninnError> {
     let offset = opt_positive(args, "offset")?;
     let limit = opt_positive(args, "limit")?;
     if offset.is_none() && limit.is_none() {
@@ -1895,25 +1890,25 @@ fn opt_line_range(args: &JsonObject) -> Result<Option<LineRange>, AgentmemError>
 /// Parse one `read_memory_notes` entry: a bare path string or a
 /// `{ path, offset?, limit? }` object. A malformed entry is a call-level
 /// `invalid_argument` — per-entry errors are reserved for path resolution and IO.
-fn parse_batch_entry(entry: &Value) -> Result<(String, Option<LineRange>), AgentmemError> {
+fn parse_batch_entry(entry: &Value) -> Result<(String, Option<LineRange>), MuninnError> {
     match entry {
         Value::String(path) => Ok((path.clone(), None)),
         Value::Object(fields) => {
             for key in fields.keys() {
                 if !matches!(key.as_str(), "path" | "offset" | "limit") {
-                    return Err(AgentmemError::InvalidArgument {
+                    return Err(MuninnError::InvalidArgument {
                         message: format!("unexpected key '{key}' in 'paths' entry"),
                     });
                 }
             }
             let Some(Value::String(path)) = fields.get("path") else {
-                return Err(AgentmemError::InvalidArgument {
+                return Err(MuninnError::InvalidArgument {
                     message: "object entries in 'paths' must carry a string 'path'".to_string(),
                 });
             };
             Ok((path.clone(), opt_line_range(fields)?))
         }
-        _ => Err(AgentmemError::InvalidArgument {
+        _ => Err(MuninnError::InvalidArgument {
             message:
                 "argument 'paths' entries must be strings or { path, offset?, limit? } objects"
                     .to_string(),
@@ -1924,27 +1919,27 @@ fn parse_batch_entry(entry: &Value) -> Result<(String, Option<LineRange>), Agent
 /// Parse one `write_memory_notes` entry: a `{ path, content, append? }` object.
 /// A malformed entry is a call-level `invalid_argument` — the batch is
 /// all-or-nothing, so nothing is validated further once any entry is malformed.
-fn parse_batch_write_entry(entry: &Value) -> Result<(String, String, bool), AgentmemError> {
+fn parse_batch_write_entry(entry: &Value) -> Result<(String, String, bool), MuninnError> {
     let Value::Object(fields) = entry else {
-        return Err(AgentmemError::InvalidArgument {
+        return Err(MuninnError::InvalidArgument {
             message: "argument 'notes' entries must be { path, content, append? } objects"
                 .to_string(),
         });
     };
     for key in fields.keys() {
         if !matches!(key.as_str(), "path" | "content" | "append") {
-            return Err(AgentmemError::InvalidArgument {
+            return Err(MuninnError::InvalidArgument {
                 message: format!("unexpected key '{key}' in 'notes' entry"),
             });
         }
     }
     let Some(Value::String(path)) = fields.get("path") else {
-        return Err(AgentmemError::InvalidArgument {
+        return Err(MuninnError::InvalidArgument {
             message: "entries in 'notes' must carry a string 'path'".to_string(),
         });
     };
     let Some(Value::String(content)) = fields.get("content") else {
-        return Err(AgentmemError::InvalidArgument {
+        return Err(MuninnError::InvalidArgument {
             message: "entries in 'notes' must carry a string 'content'".to_string(),
         });
     };
@@ -1952,7 +1947,7 @@ fn parse_batch_write_entry(entry: &Value) -> Result<(String, String, bool), Agen
         None | Some(Value::Null) => false,
         Some(Value::Bool(b)) => *b,
         Some(_) => {
-            return Err(AgentmemError::InvalidArgument {
+            return Err(MuninnError::InvalidArgument {
                 message: "'append' in a 'notes' entry must be a boolean".to_string(),
             });
         }
@@ -1962,14 +1957,14 @@ fn parse_batch_write_entry(entry: &Value) -> Result<(String, String, bool), Agen
 
 /// Map an `evolve_core_persona` `which` value to its conventional filename and
 /// optional line cap.
-fn evolve_target(which: &str) -> Result<(&'static str, Option<usize>), AgentmemError> {
+fn evolve_target(which: &str) -> Result<(&'static str, Option<usize>), MuninnError> {
     match which {
         "persona" => Ok(("PERSONA.md", None)),
         "prompt" => Ok(("PROMPT.md", None)),
         "rules" => Ok(("RULES.md", Some(40))),
         "user" => Ok(("USER.md", Some(100))),
         "memory" => Ok(("MEMORY.md", Some(200))),
-        other => Err(AgentmemError::InvalidArgument {
+        other => Err(MuninnError::InvalidArgument {
             message: format!(
                 "which must be one of persona|prompt|rules|user|memory, got '{other}'"
             ),
@@ -1980,26 +1975,26 @@ fn evolve_target(which: &str) -> Result<(&'static str, Option<usize>), AgentmemE
 /// Parse one `evolve_core_persona` batch entry: a `{ which, content }` object.
 /// A malformed entry is a call-level `invalid_argument` — the batch is
 /// all-or-nothing, so nothing is validated further once any entry is malformed.
-fn parse_evolve_update_entry(entry: &Value) -> Result<(String, String), AgentmemError> {
+fn parse_evolve_update_entry(entry: &Value) -> Result<(String, String), MuninnError> {
     let Value::Object(fields) = entry else {
-        return Err(AgentmemError::InvalidArgument {
+        return Err(MuninnError::InvalidArgument {
             message: "argument 'updates' entries must be { which, content } objects".to_string(),
         });
     };
     for key in fields.keys() {
         if !matches!(key.as_str(), "which" | "content") {
-            return Err(AgentmemError::InvalidArgument {
+            return Err(MuninnError::InvalidArgument {
                 message: format!("unexpected key '{key}' in 'updates' entry"),
             });
         }
     }
     let Some(Value::String(which)) = fields.get("which") else {
-        return Err(AgentmemError::InvalidArgument {
+        return Err(MuninnError::InvalidArgument {
             message: "entries in 'updates' must carry a string 'which'".to_string(),
         });
     };
     let Some(Value::String(content)) = fields.get("content") else {
-        return Err(AgentmemError::InvalidArgument {
+        return Err(MuninnError::InvalidArgument {
             message: "entries in 'updates' must carry a string 'content'".to_string(),
         });
     };

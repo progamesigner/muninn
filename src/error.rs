@@ -1,6 +1,6 @@
 //! The crate-wide error type and its mapping onto the MCP boundary.
 //!
-//! Internal layers return [`AgentmemError`]. At the tool boundary it is converted
+//! Internal layers return [`MuninnError`]. At the tool boundary it is converted
 //! into either a structured MCP tool result (domain errors the agent should see and
 //! react to) or a protocol-level [`rmcp::ErrorData`] (argument/schema violations).
 //!
@@ -59,7 +59,7 @@ impl ErrorCode {
 /// LLM reader and reference the *virtual* path the client supplied, never the
 /// resolved physical path.
 #[derive(Debug, thiserror::Error)]
-pub enum AgentmemError {
+pub enum MuninnError {
     #[error("path '{virtual_path}' escapes the configured vault root")]
     PathEscapesRoot { virtual_path: String },
 
@@ -136,34 +136,34 @@ pub enum AgentmemError {
     Transport { message: String },
 }
 
-impl AgentmemError {
+impl MuninnError {
     /// The structured code for this error.
     pub fn code(&self) -> ErrorCode {
         match self {
-            AgentmemError::PathEscapesRoot { .. } => ErrorCode::PathEscapesRoot,
-            AgentmemError::PathNotPermitted { .. } => ErrorCode::PathNotPermitted,
-            AgentmemError::RootPathReserved { .. } => ErrorCode::PathNotPermitted,
-            AgentmemError::WriteDenied { .. } => ErrorCode::WriteDenied,
-            AgentmemError::CrossScopeLink { .. } => ErrorCode::WriteDenied,
-            AgentmemError::MissingScope { .. } => ErrorCode::MissingScope,
-            AgentmemError::ScopeDenied { .. } => ErrorCode::ScopeDenied,
-            AgentmemError::NotFound { .. } => ErrorCode::NotFound,
-            AgentmemError::DestinationExists { .. } => ErrorCode::DestinationExists,
-            AgentmemError::EditSearchNotFound => ErrorCode::EditSearchNotFound,
-            AgentmemError::EditSearchAmbiguous { .. } => ErrorCode::EditSearchAmbiguous,
-            AgentmemError::InvalidArgument { .. } => ErrorCode::InvalidArgument,
-            AgentmemError::Unsupported { .. } => ErrorCode::Unsupported,
-            AgentmemError::Io { .. } => ErrorCode::Io,
-            AgentmemError::Config { .. } => ErrorCode::Config,
-            AgentmemError::Transport { .. } => ErrorCode::Transport,
+            MuninnError::PathEscapesRoot { .. } => ErrorCode::PathEscapesRoot,
+            MuninnError::PathNotPermitted { .. } => ErrorCode::PathNotPermitted,
+            MuninnError::RootPathReserved { .. } => ErrorCode::PathNotPermitted,
+            MuninnError::WriteDenied { .. } => ErrorCode::WriteDenied,
+            MuninnError::CrossScopeLink { .. } => ErrorCode::WriteDenied,
+            MuninnError::MissingScope { .. } => ErrorCode::MissingScope,
+            MuninnError::ScopeDenied { .. } => ErrorCode::ScopeDenied,
+            MuninnError::NotFound { .. } => ErrorCode::NotFound,
+            MuninnError::DestinationExists { .. } => ErrorCode::DestinationExists,
+            MuninnError::EditSearchNotFound => ErrorCode::EditSearchNotFound,
+            MuninnError::EditSearchAmbiguous { .. } => ErrorCode::EditSearchAmbiguous,
+            MuninnError::InvalidArgument { .. } => ErrorCode::InvalidArgument,
+            MuninnError::Unsupported { .. } => ErrorCode::Unsupported,
+            MuninnError::Io { .. } => ErrorCode::Io,
+            MuninnError::Config { .. } => ErrorCode::Config,
+            MuninnError::Transport { .. } => ErrorCode::Transport,
         }
     }
 
-    /// Construct an [`AgentmemError::Io`] from a raw IO error, retaining only its
+    /// Construct an [`MuninnError::Io`] from a raw IO error, retaining only its
     /// kind and a caller-supplied static context label. The raw OS message is
     /// dropped here so it can never leak past the boundary.
     pub fn io(context: &'static str, err: &std::io::Error) -> Self {
-        AgentmemError::Io {
+        MuninnError::Io {
             kind: err.kind(),
             context,
         }
@@ -187,8 +187,8 @@ impl AgentmemError {
 /// Used for argument/schema violations that should be reported as JSON-RPC errors
 /// rather than as tool results. The structured `code` is preserved in the `data`
 /// field so clients can branch on it programmatically.
-impl From<AgentmemError> for McpError {
-    fn from(err: AgentmemError) -> Self {
+impl From<MuninnError> for McpError {
+    fn from(err: MuninnError) -> Self {
         let code = err.code();
         let data = Some(json!({ "code": code.as_str() }));
         match code {
@@ -206,7 +206,7 @@ impl From<AgentmemError> for McpError {
 }
 
 /// A convenient crate-wide result alias.
-pub type Result<T> = std::result::Result<T, AgentmemError>;
+pub type Result<T> = std::result::Result<T, MuninnError>;
 
 #[cfg(test)]
 mod tests {
@@ -244,7 +244,7 @@ mod tests {
             std::io::ErrorKind::PermissionDenied,
             "os error 13: Permission denied (/etc/shadow)",
         );
-        let err = AgentmemError::io("reading note", &raw);
+        let err = MuninnError::io("reading note", &raw);
         let message = err.to_string();
         assert!(!message.contains("os error 13"));
         assert!(!message.contains("/etc/shadow"));
@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn tool_result_carries_code_and_is_error() {
-        let err = AgentmemError::NotFound {
+        let err = MuninnError::NotFound {
             virtual_path: "PERSONA.md".to_string(),
         };
         let result = err.into_tool_result();
@@ -278,7 +278,7 @@ mod tests {
     /// structured code, and never enumerates the grant set.
     #[test]
     fn scope_denied_names_key_only() {
-        let err = AgentmemError::ScopeDenied {
+        let err = MuninnError::ScopeDenied {
             key: "agent".to_string(),
         };
         assert_eq!(err.code().as_str(), "scope_denied");
@@ -295,7 +295,7 @@ mod tests {
     /// resolved physical path never does (callers pass only the virtual path).
     #[test]
     fn not_found_message_uses_virtual_path() {
-        let err = AgentmemError::NotFound {
+        let err = MuninnError::NotFound {
             virtual_path: "tasks/plan.md".to_string(),
         };
         assert!(err.to_string().contains("tasks/plan.md"));

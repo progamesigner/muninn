@@ -8,7 +8,7 @@
 use tracing_subscriber::EnvFilter;
 
 /// Install the global tracing subscriber, filtering by `filter_directive`
-/// (the resolved `AGENTMEM_LOG` value) and writing exclusively to stderr.
+/// (the resolved `MUNINN_LOG` value) and writing exclusively to stderr.
 ///
 /// Returns an error if a global subscriber was already installed (e.g. when
 /// called twice in a test process).

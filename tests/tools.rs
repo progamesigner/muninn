@@ -8,17 +8,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentmem::AgentmemError;
-use agentmem::config::{Grant, RecallBackendKind, RecallConfig};
-use agentmem::path::PathResolver;
-use agentmem::policy::Policy;
-use agentmem::recall::RecallEngine;
-use agentmem::scheme::Scheme;
-use agentmem::storage::Storage;
-use agentmem::tools::Toolbox;
 use assert_fs::TempDir;
 use camino::Utf8PathBuf;
 use chrono_tz::Tz;
+use muninn::MuninnError;
+use muninn::config::{Grant, RecallBackendKind, RecallConfig};
+use muninn::path::PathResolver;
+use muninn::policy::Policy;
+use muninn::recall::RecallEngine;
+use muninn::scheme::Scheme;
+use muninn::storage::Storage;
+use muninn::tools::Toolbox;
 use rmcp::model::CallToolResult;
 use serde_json::{Value, json};
 
@@ -117,14 +117,14 @@ fn default_tb(tmp: &TempDir) -> Toolbox {
     toolbox(tmp, "Agents", "<agent>.<user>", Policy::Namespaced)
 }
 
-fn call(tb: &Toolbox, name: &str, args: Value) -> Result<CallToolResult, AgentmemError> {
+fn call(tb: &Toolbox, name: &str, args: Value) -> Result<CallToolResult, MuninnError> {
     let obj = args.as_object().expect("args must be an object").clone();
     tb.call(name, &obj, &Grant::AllScopes)
         .expect("tool name must be known")
 }
 
 /// Assert the call failed with the given error code.
-fn assert_code(res: Result<CallToolResult, AgentmemError>, code: &str) {
+fn assert_code(res: Result<CallToolResult, MuninnError>, code: &str) {
     match res {
         Err(e) => assert_eq!(e.code().as_str(), code, "unexpected error variant: {e}"),
         Ok(r) => panic!(
@@ -134,7 +134,7 @@ fn assert_code(res: Result<CallToolResult, AgentmemError>, code: &str) {
     }
 }
 
-fn structured(res: Result<CallToolResult, AgentmemError>) -> Value {
+fn structured(res: Result<CallToolResult, MuninnError>) -> Value {
     res.expect("expected success")
         .structured_content
         .expect("structured content")
@@ -3913,7 +3913,7 @@ fn missing_scope_key_is_reported_by_name() {
         "read_memory_note",
         json!({"agent":"jarvis","path":"Agents/topics/n.md"}),
     ) {
-        Err(AgentmemError::MissingScope { key }) => assert_eq!(key, "user"),
+        Err(MuninnError::MissingScope { key }) => assert_eq!(key, "user"),
         other => panic!("expected missing_scope(user), got {other:?}"),
     }
 }

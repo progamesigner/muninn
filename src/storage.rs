@@ -18,7 +18,7 @@ use dashmap::DashMap;
 use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
-use crate::error::AgentmemError;
+use crate::error::MuninnError;
 use crate::path::{PathResolver, PhysicalPath, VirtualPath};
 use crate::policy::Region;
 
@@ -31,17 +31,17 @@ impl Cursor {
         BASE64.encode(offset.to_string().as_bytes())
     }
 
-    pub fn decode(cursor: &str) -> Result<u64, AgentmemError> {
+    pub fn decode(cursor: &str) -> Result<u64, MuninnError> {
         let bytes = BASE64
             .decode(cursor)
-            .map_err(|_| AgentmemError::InvalidArgument {
+            .map_err(|_| MuninnError::InvalidArgument {
                 message: "cursor is not valid".to_string(),
             })?;
-        let text = std::str::from_utf8(&bytes).map_err(|_| AgentmemError::InvalidArgument {
+        let text = std::str::from_utf8(&bytes).map_err(|_| MuninnError::InvalidArgument {
             message: "cursor is not valid".to_string(),
         })?;
         text.parse::<u64>()
-            .map_err(|_| AgentmemError::InvalidArgument {
+            .map_err(|_| MuninnError::InvalidArgument {
                 message: "cursor is not valid".to_string(),
             })
     }
@@ -161,16 +161,16 @@ impl Storage {
     }
 
     /// Read a file's UTF-8 contents.
-    pub fn read(&self, physical: &PhysicalPath) -> Result<String, AgentmemError> {
+    pub fn read(&self, physical: &PhysicalPath) -> Result<String, MuninnError> {
         match std::fs::read(physical.as_path()) {
-            Ok(bytes) => String::from_utf8(bytes).map_err(|_| AgentmemError::Io {
+            Ok(bytes) => String::from_utf8(bytes).map_err(|_| MuninnError::Io {
                 kind: std::io::ErrorKind::InvalidData,
                 context: "reading note (not valid UTF-8)",
             }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(AgentmemError::NotFound {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(MuninnError::NotFound {
                 virtual_path: self.display_path(physical),
             }),
-            Err(e) => Err(AgentmemError::io("reading note", &e)),
+            Err(e) => Err(MuninnError::io("reading note", &e)),
         }
     }
 
@@ -180,7 +180,7 @@ impl Storage {
         &self,
         physical: &PhysicalPath,
         content: &str,
-    ) -> Result<usize, AgentmemError> {
+    ) -> Result<usize, MuninnError> {
         self.with_target_lock(physical.as_path(), || {
             self.write_atomic_locked(physical, content)
         })
@@ -194,13 +194,13 @@ impl Storage {
     pub fn read_modify_write(
         &self,
         physical: &PhysicalPath,
-        f: impl FnOnce(Option<String>) -> Result<String, AgentmemError>,
-    ) -> Result<usize, AgentmemError> {
+        f: impl FnOnce(Option<String>) -> Result<String, MuninnError>,
+    ) -> Result<usize, MuninnError> {
         self.with_target_lock(physical.as_path(), || {
             let current = match std::fs::read_to_string(physical.as_path()) {
                 Ok(s) => Some(s),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                Err(e) => return Err(AgentmemError::io("reading note", &e)),
+                Err(e) => return Err(MuninnError::io("reading note", &e)),
             };
             let next = f(current)?;
             self.write_atomic_locked(physical, &next)
@@ -211,22 +211,22 @@ impl Storage {
         &self,
         physical: &PhysicalPath,
         content: &str,
-    ) -> Result<usize, AgentmemError> {
+    ) -> Result<usize, MuninnError> {
         self.mkdirs_for(physical)?;
-        let parent = physical.as_path().parent().ok_or(AgentmemError::Io {
+        let parent = physical.as_path().parent().ok_or(MuninnError::Io {
             kind: std::io::ErrorKind::InvalidInput,
             context: "resolving parent directory",
         })?;
 
         let mut temp = tempfile::NamedTempFile::new_in(parent)
-            .map_err(|e| AgentmemError::io("creating temp file", &e))?;
+            .map_err(|e| MuninnError::io("creating temp file", &e))?;
         temp.write_all(content.as_bytes())
-            .map_err(|e| AgentmemError::io("writing temp file", &e))?;
+            .map_err(|e| MuninnError::io("writing temp file", &e))?;
         temp.as_file()
             .sync_all()
-            .map_err(|e| AgentmemError::io("syncing temp file", &e))?;
+            .map_err(|e| MuninnError::io("syncing temp file", &e))?;
         temp.persist(physical.as_path())
-            .map_err(|e| AgentmemError::io("renaming temp file", &e.error))?;
+            .map_err(|e| MuninnError::io("renaming temp file", &e.error))?;
         Ok(content.len())
     }
 
@@ -237,43 +237,41 @@ impl Storage {
         physical: &PhysicalPath,
         search: &str,
         replace: &str,
-    ) -> Result<usize, AgentmemError> {
+    ) -> Result<usize, MuninnError> {
         self.with_target_lock(physical.as_path(), || {
             let current = self.read(physical)?;
             let count = current.matches(search).count();
             match count {
-                0 => Err(AgentmemError::EditSearchNotFound),
+                0 => Err(MuninnError::EditSearchNotFound),
                 1 => {
                     let updated = current.replacen(search, replace, 1);
                     self.write_atomic_locked(physical, &updated)?;
                     Ok(search.len())
                 }
-                n => Err(AgentmemError::EditSearchAmbiguous { count: n }),
+                n => Err(MuninnError::EditSearchAmbiguous { count: n }),
             }
         })
     }
 
     /// Delete a single file. Never removes directories; leaves an emptied parent
     /// in place.
-    pub fn delete(&self, physical: &PhysicalPath) -> Result<(), AgentmemError> {
+    pub fn delete(&self, physical: &PhysicalPath) -> Result<(), MuninnError> {
         self.with_target_lock(physical.as_path(), || {
             match std::fs::remove_file(physical.as_path()) {
                 Ok(()) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    Err(AgentmemError::NotFound {
-                        virtual_path: self.display_path(physical),
-                    })
-                }
-                Err(e) => Err(AgentmemError::io("deleting note", &e)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(MuninnError::NotFound {
+                    virtual_path: self.display_path(physical),
+                }),
+                Err(e) => Err(MuninnError::io("deleting note", &e)),
             }
         })
     }
 
     /// Create any missing parent directories for a write target.
-    pub fn mkdirs_for(&self, physical: &PhysicalPath) -> Result<(), AgentmemError> {
+    pub fn mkdirs_for(&self, physical: &PhysicalPath) -> Result<(), MuninnError> {
         if let Some(parent) = physical.as_path().parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|e| AgentmemError::io("creating parent directories", &e))?;
+                .map_err(|e| MuninnError::io("creating parent directories", &e))?;
         }
         Ok(())
     }
@@ -304,7 +302,7 @@ impl Storage {
     pub fn list_inside_agents_folder(
         &self,
         rendered_scope: &str,
-    ) -> Result<Vec<VirtualPath>, AgentmemError> {
+    ) -> Result<Vec<VirtualPath>, MuninnError> {
         let agents_root = self.agents_root();
         let mut out = Vec::new();
         for (physical, _rel) in self.walk_files(&agents_root) {
@@ -317,7 +315,7 @@ impl Storage {
 
     /// List files outside the agents folder (but inside the vault root) as clean
     /// virtual paths.
-    pub fn list_outside_agents_folder(&self) -> Result<Vec<VirtualPath>, AgentmemError> {
+    pub fn list_outside_agents_folder(&self) -> Result<Vec<VirtualPath>, MuninnError> {
         if self.resolver.agents_dir().as_str().is_empty() {
             // The agents folder is the vault root; there is no outside region.
             return Ok(Vec::new());
@@ -340,7 +338,7 @@ impl Storage {
         &self,
         rendered_scope: &str,
         regions: &[Region],
-    ) -> Result<Vec<VirtualPath>, AgentmemError> {
+    ) -> Result<Vec<VirtualPath>, MuninnError> {
         let mut set: BTreeSet<String> = BTreeSet::new();
         for region in regions {
             let paths = match region {
@@ -364,7 +362,7 @@ impl Storage {
         &self,
         rendered_scope: &str,
         regions: &[Region],
-    ) -> Result<LinkIndex, AgentmemError> {
+    ) -> Result<LinkIndex, MuninnError> {
         let mut index = LinkIndex::default();
         for region in regions {
             let paths = match region {
@@ -609,7 +607,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             s.read(&physical),
-            Err(AgentmemError::NotFound { .. })
+            Err(MuninnError::NotFound { .. })
         ));
     }
 
@@ -640,13 +638,13 @@ mod tests {
 
         assert!(matches!(
             s.edit_search_replace(&physical, "zeta", "z"),
-            Err(AgentmemError::EditSearchNotFound)
+            Err(MuninnError::EditSearchNotFound)
         ));
 
         s.write_atomic(&physical, "dup dup").unwrap();
         assert!(matches!(
             s.edit_search_replace(&physical, "dup", "x"),
-            Err(AgentmemError::EditSearchAmbiguous { count: 2 })
+            Err(MuninnError::EditSearchAmbiguous { count: 2 })
         ));
     }
 
@@ -663,7 +661,7 @@ mod tests {
         assert!(!physical.as_path().exists());
         assert!(matches!(
             s.delete(&physical),
-            Err(AgentmemError::NotFound { .. })
+            Err(MuninnError::NotFound { .. })
         ));
     }
 

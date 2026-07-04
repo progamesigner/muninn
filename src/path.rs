@@ -18,7 +18,7 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 
-use crate::error::AgentmemError;
+use crate::error::MuninnError;
 use crate::policy::Region;
 use crate::scheme::Scheme;
 
@@ -36,21 +36,21 @@ impl VirtualPath {
     /// Rejects empty input, embedded NUL bytes, absolute paths, and any `..`
     /// component. Bare `.` components are dropped. The result is always relative
     /// and traversal-free.
-    pub fn new(raw: &str) -> Result<VirtualPath, AgentmemError> {
+    pub fn new(raw: &str) -> Result<VirtualPath, MuninnError> {
         if raw.is_empty() {
-            return Err(AgentmemError::InvalidArgument {
+            return Err(MuninnError::InvalidArgument {
                 message: "path must not be empty".to_string(),
             });
         }
         if raw.contains('\0') {
-            return Err(AgentmemError::InvalidArgument {
+            return Err(MuninnError::InvalidArgument {
                 message: "path must not contain NUL bytes".to_string(),
             });
         }
 
         let candidate = Utf8Path::new(raw);
         if candidate.is_absolute() || raw.starts_with('/') || raw.starts_with('\\') {
-            return Err(AgentmemError::PathEscapesRoot {
+            return Err(MuninnError::PathEscapesRoot {
                 virtual_path: raw.to_string(),
             });
         }
@@ -62,7 +62,7 @@ impl VirtualPath {
                 CurDir => {}
                 Normal(seg) => normalised.push(seg),
                 ParentDir | RootDir | Prefix(_) => {
-                    return Err(AgentmemError::PathEscapesRoot {
+                    return Err(MuninnError::PathEscapesRoot {
                         virtual_path: raw.to_string(),
                     });
                 }
@@ -70,7 +70,7 @@ impl VirtualPath {
         }
 
         if normalised.as_str().is_empty() {
-            return Err(AgentmemError::InvalidArgument {
+            return Err(MuninnError::InvalidArgument {
                 message: "path must name a file".to_string(),
             });
         }
@@ -210,7 +210,7 @@ impl PathResolver {
         &self,
         rendered_scope: &str,
         vpath: &VirtualPath,
-    ) -> Result<PhysicalPath, AgentmemError> {
+    ) -> Result<PhysicalPath, MuninnError> {
         let region = self.detect_region(vpath);
 
         let relative: Utf8PathBuf = match region {
@@ -222,7 +222,7 @@ impl PathResolver {
                     self.join_agents(&remainder)
                 } else {
                     let transformed = apply_scope_to_relative(&remainder, rendered_scope)
-                        .ok_or_else(|| AgentmemError::InvalidArgument {
+                        .ok_or_else(|| MuninnError::InvalidArgument {
                             message: "path must name a file".to_string(),
                         })?;
                     // <agents_dir>/<scope>/<transformed remainder>
@@ -304,8 +304,8 @@ impl PathResolver {
         &self,
         physical: &std::path::Path,
         vpath: &VirtualPath,
-    ) -> Result<(), AgentmemError> {
-        let escapes = || AgentmemError::PathEscapesRoot {
+    ) -> Result<(), MuninnError> {
+        let escapes = || MuninnError::PathEscapesRoot {
             virtual_path: vpath.as_str().to_string(),
         };
 
@@ -419,23 +419,23 @@ mod tests {
     fn rejects_empty_absolute_and_traversal() {
         assert!(matches!(
             VirtualPath::new(""),
-            Err(AgentmemError::InvalidArgument { .. })
+            Err(MuninnError::InvalidArgument { .. })
         ));
         assert!(matches!(
             VirtualPath::new("/etc/passwd"),
-            Err(AgentmemError::PathEscapesRoot { .. })
+            Err(MuninnError::PathEscapesRoot { .. })
         ));
         assert!(matches!(
             VirtualPath::new("../../etc/passwd"),
-            Err(AgentmemError::PathEscapesRoot { .. })
+            Err(MuninnError::PathEscapesRoot { .. })
         ));
         assert!(matches!(
             VirtualPath::new("a/../../b"),
-            Err(AgentmemError::PathEscapesRoot { .. })
+            Err(MuninnError::PathEscapesRoot { .. })
         ));
         assert!(matches!(
             VirtualPath::new("a\0b"),
-            Err(AgentmemError::InvalidArgument { .. })
+            Err(MuninnError::InvalidArgument { .. })
         ));
     }
 
@@ -571,7 +571,7 @@ mod tests {
         let vp = VirtualPath::new("Agents/escape/secret.md").unwrap();
         assert!(matches!(
             r.resolve("", &vp),
-            Err(AgentmemError::PathEscapesRoot { .. })
+            Err(MuninnError::PathEscapesRoot { .. })
         ));
     }
 

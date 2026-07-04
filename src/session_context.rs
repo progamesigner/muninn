@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::error::AgentmemError;
+use crate::error::MuninnError;
 use crate::path::VirtualPath;
 use crate::storage::Storage;
 use crate::template::Template;
@@ -81,7 +81,7 @@ const DEFAULT_CONTEXT: &str = "\
 </PROMPT>
 
 {{onboarding_directive}}
-> **Vault layout & conventions.** Read the `session-layout` resource (`agentmem://session-layout/…`) or `GET /v1/layout` before organizing memory. Writes that violate the line caps or the wrapper-only rules will error.
+> **Vault layout & conventions.** Read the `session-layout` resource (`muninn://session-layout/…`) or `GET /v1/layout` before organizing memory. Writes that violate the line caps or the wrapper-only rules will error.
 ";
 
 /// The compiled-in default lean-bootstrap template, ordered server-owned-content
@@ -96,16 +96,12 @@ const DEFAULT_BOOTSTRAP: &str = "\
 
 {{scope_directive}}
 
-> **Lean bootstrap.** Call the `load_session_context` tool for the full context (persona, working memory, user profile, workflow prompt). Read the `session-layout` resource (`agentmem://session-layout/…`) or `GET /v1/layout` for vault structure and conventions; writes that violate the line caps or the wrapper-only rules will error.
+> **Lean bootstrap.** Call the `load_session_context` tool for the full context (persona, working memory, user profile, workflow prompt). Read the `session-layout` resource (`muninn://session-layout/…`) or `GET /v1/layout` for vault structure and conventions; writes that violate the line caps or the wrapper-only rules will error.
 
 {{onboarding_directive}}
 {{files.rules}}
 ";
 
-/// The compiled-in default layout content, served by the `session-layout`
-/// resource and `GET /v1/layout`. It carries the vault-mechanics guidance
-/// formerly embedded in the session-context `<AGENTMEM:LAYOUT>` section, minus
-/// the missing-files onboarding paragraph (now the `{{onboarding_directive}}`).
 const DEFAULT_LAYOUT: &str = "\
 # Memory Layout
 
@@ -176,13 +172,13 @@ pub fn render_session_context(
     global_template_file: &Path,
     scope: &BTreeMap<String, String>,
     kind: RenderKind,
-) -> Result<SessionContext, AgentmemError> {
+) -> Result<SessionContext, MuninnError> {
     let resolver = storage.resolver();
     let rendered_scope =
         resolver
             .scheme()
             .render(scope)
-            .map_err(|e| AgentmemError::InvalidArgument {
+            .map_err(|e| MuninnError::InvalidArgument {
                 message: e.to_string(),
             })?;
 
@@ -204,7 +200,7 @@ pub fn render_session_context(
                 };
                 context.insert(key, content);
             }
-            Err(AgentmemError::NotFound { .. }) => {
+            Err(MuninnError::NotFound { .. }) => {
                 context.insert(key, MISSING_SENTINEL.to_string());
                 missing.push((*filename).to_string());
             }
@@ -262,13 +258,13 @@ pub fn render_layout(
     storage: &Storage,
     global_layout_file: &Path,
     scope: &BTreeMap<String, String>,
-) -> Result<String, AgentmemError> {
+) -> Result<String, MuninnError> {
     let resolver = storage.resolver();
     let rendered_scope =
         resolver
             .scheme()
             .render(scope)
-            .map_err(|e| AgentmemError::InvalidArgument {
+            .map_err(|e| MuninnError::InvalidArgument {
                 message: e.to_string(),
             })?;
 
@@ -302,13 +298,13 @@ fn resolve_template_source(
     per_scope_file: &str,
     global_template_file: &Path,
     default_template: &str,
-) -> Result<String, AgentmemError> {
+) -> Result<String, MuninnError> {
     // (1) per-scope file, via the scope suffix mechanism inside the agents folder.
     let vpath = agents_vpath(storage, per_scope_file)?;
     let physical = storage.resolver().resolve(rendered_scope, &vpath)?;
     match storage.read(&physical) {
         Ok(content) => return Ok(content),
-        Err(AgentmemError::NotFound { .. }) => {}
+        Err(MuninnError::NotFound { .. }) => {}
         Err(e) => return Err(e),
     }
 
@@ -316,7 +312,7 @@ fn resolve_template_source(
     match std::fs::read_to_string(global_template_file) {
         Ok(content) => return Ok(content),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(AgentmemError::io("reading session-context template", &e)),
+        Err(e) => return Err(MuninnError::io("reading session-context template", &e)),
     }
 
     // (3) compiled-in default.
@@ -326,7 +322,7 @@ fn resolve_template_source(
 /// The clean virtual path of a conventional file relative to the agents folder
 /// (e.g. `Agents/PERSONA.md`, or `PERSONA.md` when the agents folder is the
 /// vault root).
-fn agents_vpath(storage: &Storage, relative: &str) -> Result<VirtualPath, AgentmemError> {
+fn agents_vpath(storage: &Storage, relative: &str) -> Result<VirtualPath, MuninnError> {
     let agents = storage.resolver().agents_dir();
     let full = if agents.as_str().is_empty() {
         relative.to_string()
@@ -358,12 +354,12 @@ fn scope_keys_csv(scope: &BTreeMap<String, String>) -> Option<String> {
 fn scope_directive(scope: &BTreeMap<String, String>) -> String {
     match scope_keys_csv(scope) {
         Some(keys) => format!(
-            "> **Active memory scope — `{keys}`.** Every AgentMem memory tool call MUST \
+            "> **Active memory scope — `{keys}`.** Every Muninn memory tool call MUST \
              carry exactly these scope arguments on every turn — otherwise it errors or \
              reads/writes the wrong vault."
         ),
         None => String::from(
-            "> **Active memory scope.** Every AgentMem memory tool call MUST carry the \
+            "> **Active memory scope.** Every Muninn memory tool call MUST carry the \
              scope keys defined by the server's VFS scheme on every turn — otherwise it \
              errors or reads/writes the wrong vault.",
         ),
@@ -489,7 +485,7 @@ mod tests {
         let prompt = sc.rendered.find("<PROMPT>").unwrap();
         assert!(persona < rules && rules < memory && memory < user && user < prompt);
         // No tools guide, no embedded layout prose.
-        assert!(!sc.rendered.contains("<AGENTMEM:TOOLS>"));
+        assert!(!sc.rendered.contains("<MUNINN:TOOLS>"));
         assert!(!sc.rendered.contains("ordinary filesystem"));
         assert!(!sc.rendered.contains("Line caps (enforced"));
         // A pointer to the layout surface is present.
@@ -565,7 +561,7 @@ mod tests {
         assert!(!sc.rendered.contains("<MEMORY>"));
         assert!(!sc.rendered.contains("<USER>"));
         assert!(!sc.rendered.contains("<PROMPT>"));
-        assert!(!sc.rendered.contains("<AGENTMEM:TOOLS>"));
+        assert!(!sc.rendered.contains("<MUNINN:TOOLS>"));
         // Rules are the final content: nothing but trailing whitespace follows.
         let rules_at = sc.rendered.find("RULES-BODY").unwrap();
         assert!(sc.rendered[rules_at..].trim_end() == "RULES-BODY");

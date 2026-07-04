@@ -5,7 +5,7 @@
 //! transport selected in the [`Config`].
 
 use crate::config::{Config, Transport};
-use crate::mcp::AgentmemServer;
+use crate::mcp::MuninnServer;
 
 pub mod stdio;
 
@@ -37,7 +37,7 @@ pub(crate) async fn shutdown_signal() {
 
 /// Serve the MCP server on the transport configured in `config`, blocking until
 /// the server terminates (signal, closed stdin, or fatal error).
-pub async fn serve(config: &Config, server: AgentmemServer) -> anyhow::Result<()> {
+pub async fn serve(config: &Config, server: MuninnServer) -> anyhow::Result<()> {
     // Start the recall watcher and kick off the eager index build in the
     // background, so liveness stays up while `GET /readyz` reports not-ready until
     // every index is built.

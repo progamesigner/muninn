@@ -3,16 +3,16 @@
 //! [`Toolbox`] directly — the same path the MCP `call_tool` handler uses — so the
 //! transform is exercised end to end alongside scope resolution and policy gating.
 
-use agentmem::AgentmemError;
-use agentmem::config::Grant;
-use agentmem::path::PathResolver;
-use agentmem::policy::Policy;
-use agentmem::scheme::Scheme;
-use agentmem::storage::Storage;
-use agentmem::tools::Toolbox;
 use assert_fs::TempDir;
 use camino::Utf8PathBuf;
 use chrono_tz::Tz;
+use muninn::MuninnError;
+use muninn::config::Grant;
+use muninn::path::PathResolver;
+use muninn::policy::Policy;
+use muninn::scheme::Scheme;
+use muninn::storage::Storage;
+use muninn::tools::Toolbox;
 use rmcp::model::CallToolResult;
 use serde_json::{Value, json};
 
@@ -34,7 +34,7 @@ fn toolbox(tmp: &TempDir, policy: Policy) -> Toolbox {
     )
 }
 
-fn call(tb: &Toolbox, name: &str, args: Value) -> Result<CallToolResult, AgentmemError> {
+fn call(tb: &Toolbox, name: &str, args: Value) -> Result<CallToolResult, MuninnError> {
     let obj = args.as_object().unwrap().clone();
     tb.call(name, &obj, &Grant::AllScopes)
         .expect("tool name must be known")

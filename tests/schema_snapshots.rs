@@ -7,16 +7,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentmem::config::{RecallBackendKind, RecallConfig};
-use agentmem::path::PathResolver;
-use agentmem::policy::Policy;
-use agentmem::recall::RecallEngine;
-use agentmem::scheme::Scheme;
-use agentmem::storage::Storage;
-use agentmem::tools::Toolbox;
 use assert_fs::TempDir;
 use camino::Utf8PathBuf;
 use chrono_tz::Tz;
+use muninn::config::{RecallBackendKind, RecallConfig};
+use muninn::path::PathResolver;
+use muninn::policy::Policy;
+use muninn::recall::RecallEngine;
+use muninn::scheme::Scheme;
+use muninn::storage::Storage;
+use muninn::tools::Toolbox;
 use serde_json::{Value, json};
 
 /// The `tools/list` schemas for a given scheme, as a name → inputSchema map.

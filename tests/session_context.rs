@@ -1,7 +1,7 @@
 //! Integration coverage for the session-context resource and prompt surfaces
 //! (change `configurable-session-context`, tasks 7.3).
 //!
-//! Drives the real `agentmem` binary over stdio and exercises
+//! Drives the real `muninn` binary over stdio and exercises
 //! `resources/templates/list` + `resources/read` and `prompts/list` +
 //! `prompts/get`, including the empty-vault case and a VFS-scheme variation.
 
@@ -19,12 +19,12 @@ async fn serve(
     tmp: &assert_fs::TempDir,
     scheme: &str,
 ) -> rmcp::service::RunningService<rmcp::RoleClient, ()> {
-    let bin = env!("CARGO_BIN_EXE_agentmem");
+    let bin = env!("CARGO_BIN_EXE_muninn");
     ().serve(
         TokioChildProcess::new(Command::new(bin).configure(|cmd| {
-            cmd.env("AGENTMEM_ROOT_DIR", tmp.path());
-            cmd.env("AGENTMEM_TRANSPORT", "stdio");
-            cmd.env("AGENTMEM_VFS_SCHEME", scheme);
+            cmd.env("MUNINN_ROOT_DIR", tmp.path());
+            cmd.env("MUNINN_TRANSPORT", "stdio");
+            cmd.env("MUNINN_VFS_SCHEME", scheme);
         }))
         .unwrap(),
     )
@@ -76,14 +76,14 @@ async fn resource_template_and_read_render_context() {
         .map(|t| t.uri_template.as_str())
         .collect();
     assert_eq!(templates.resource_templates.len(), 3);
-    assert!(uris.contains(&"agentmem://session-context/{agent}/{user}"));
-    assert!(uris.contains(&"agentmem://session-bootstrap/{agent}/{user}"));
-    assert!(uris.contains(&"agentmem://session-layout/{agent}/{user}"));
+    assert!(uris.contains(&"muninn://session-context/{agent}/{user}"));
+    assert!(uris.contains(&"muninn://session-bootstrap/{agent}/{user}"));
+    assert!(uris.contains(&"muninn://session-layout/{agent}/{user}"));
 
     // resources/read for a populated scope renders the persona body.
     let read = service
         .read_resource(ReadResourceRequestParams::new(
-            "agentmem://session-context/jarvis/tony",
+            "muninn://session-context/jarvis/tony",
         ))
         .await
         .unwrap();
@@ -94,7 +94,7 @@ async fn resource_template_and_read_render_context() {
     // Empty-vault scope still succeeds, with the missing sentinel.
     let read_empty = service
         .read_resource(ReadResourceRequestParams::new(
-            "agentmem://session-context/jarvis/sam",
+            "muninn://session-context/jarvis/sam",
         ))
         .await
         .unwrap();
@@ -124,7 +124,7 @@ async fn bootstrap_and_layout_resources_render() {
     // untagged rules — no persona, no heavier slots, no wrapper tags.
     let boot = service
         .read_resource(ReadResourceRequestParams::new(
-            "agentmem://session-bootstrap/jarvis/tony",
+            "muninn://session-bootstrap/jarvis/tony",
         ))
         .await
         .unwrap();
@@ -139,7 +139,7 @@ async fn bootstrap_and_layout_resources_render() {
     // The layout resource renders the vault-mechanics guidance.
     let layout = service
         .read_resource(ReadResourceRequestParams::new(
-            "agentmem://session-layout/jarvis/tony",
+            "muninn://session-layout/jarvis/tony",
         ))
         .await
         .unwrap();
@@ -158,7 +158,7 @@ async fn onboarding_directive_appears_for_a_fresh_scope() {
     // A fresh scope: every foundational file is missing.
     let read = service
         .read_resource(ReadResourceRequestParams::new(
-            "agentmem://session-context/jarvis/tony",
+            "muninn://session-context/jarvis/tony",
         ))
         .await
         .unwrap();
@@ -241,7 +241,7 @@ async fn surfaces_follow_a_custom_scheme() {
         .unwrap();
     assert_eq!(
         templates.resource_templates[0].uri_template,
-        "agentmem://session-context/{agent}"
+        "muninn://session-context/{agent}"
     );
 
     let prompts = service.list_prompts(Default::default()).await.unwrap();
@@ -257,7 +257,7 @@ async fn surfaces_follow_a_custom_scheme() {
     // A single-segment read resolves under the one-key scheme.
     let read = service
         .read_resource(ReadResourceRequestParams::new(
-            "agentmem://session-context/jarvis",
+            "muninn://session-context/jarvis",
         ))
         .await
         .unwrap();

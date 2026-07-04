@@ -7,7 +7,7 @@
 //! tool call resolves synchronously and the server advertises no notifications,
 //! so each `POST /mcp` is answered with a plain `application/json` body rather
 //! than an SSE stream, no `Mcp-Session-Id` is issued, and the `GET /mcp` stream
-//! carries nothing. When `AGENTMEM_HTTP_BEARER` and/or `AGENTMEM_HTTP_TOKENS_FILE` is
+//! carries nothing. When `MUNINN_HTTP_BEARER` and/or `MUNINN_HTTP_TOKENS_FILE` is
 //! configured, an `axum` middleware resolves the presented `Authorization:
 //! Bearer <token>` header to a scope [`Grant`] — all scopes for the static
 //! bearer, the configured grant for a scoped token — attaches it to the request,
@@ -30,8 +30,8 @@ use rmcp::transport::streamable_http_server::session::never::NeverSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 
 use crate::config::{Grant, TokenGrants};
-use crate::error::AgentmemError;
-use crate::mcp::AgentmemServer;
+use crate::error::MuninnError;
+use crate::mcp::MuninnServer;
 use crate::session_context::RenderKind;
 
 /// Serve over Streamable HTTP, binding `bind` until a termination signal arrives.
@@ -44,18 +44,18 @@ pub async fn serve(
     bearer: Option<String>,
     tokens: Option<TokenGrants>,
     allowed_hosts: Vec<String>,
-    server: AgentmemServer,
+    server: MuninnServer,
 ) -> anyhow::Result<()> {
     if bearer.is_none() && tokens.is_none() {
         tracing::warn!(
-            "AGENTMEM_HTTP_BEARER and AGENTMEM_HTTP_TOKENS_FILE are unset; \
+            "MUNINN_HTTP_BEARER and MUNINN_HTTP_TOKENS_FILE are unset; \
              the HTTP endpoint is unauthenticated"
         );
         if !bind.ip().is_loopback() {
             tracing::warn!(
                 %bind,
-                "binding a non-loopback interface without AGENTMEM_HTTP_BEARER or \
-                 AGENTMEM_HTTP_TOKENS_FILE; the endpoint is reachable off-host \
+                "binding a non-loopback interface without MUNINN_HTTP_BEARER or \
+                 MUNINN_HTTP_TOKENS_FILE; the endpoint is reachable off-host \
                  without authentication"
             );
         }
@@ -68,7 +68,7 @@ pub async fn serve(
         StreamableHttpServerConfig::default()
     } else if allowed_hosts == ["*"] {
         tracing::warn!(
-            "AGENTMEM_HTTP_ALLOWED_HOSTS=* disables Host validation; \
+            "MUNINN_HTTP_ALLOWED_HOSTS=* disables Host validation; \
              any Host header will be accepted"
         );
         StreamableHttpServerConfig::default().disable_allowed_hosts()
@@ -96,7 +96,7 @@ pub async fn serve(
 
     // The gated sub-router carries the MCP service and the `/v1/context` read
     // endpoint; both inherit the bearer middleware when one is configured. The
-    // `AgentmemServer` is wired in as handler state so `/v1/context` can reach
+    // `MuninnServer` is wired in as handler state so `/v1/context` can reach
     // the shared renderer.
     // Ungated probes: liveness never depends on the index (so an orchestrator
     // won't kill a building pod), readiness reflects the eager index build.
@@ -138,7 +138,7 @@ async fn healthz() -> &'static str {
 /// Readiness route. Reports `200` only once the recall index is built (or
 /// immediately when recall is disabled); `503` while the eager build is in flight,
 /// so traffic is held until the server can serve recall.
-async fn readyz(State(server): State<AgentmemServer>) -> Response {
+async fn readyz(State(server): State<MuninnServer>) -> Response {
     if server.recall_ready() {
         (StatusCode::OK, "ready").into_response()
     } else {
@@ -154,7 +154,7 @@ async fn readyz(State(server): State<AgentmemServer>) -> Response {
 /// the body. Returns `text/markdown` by default, or `{ rendered, missing }` JSON
 /// when the `Accept` header prefers `application/json`.
 async fn context(
-    State(server): State<AgentmemServer>,
+    State(server): State<MuninnServer>,
     grant: Option<Extension<Grant>>,
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
@@ -173,7 +173,7 @@ async fn context(
 /// scope binding, response negotiation, auth gate, and error mapping with
 /// `GET /v1/context`; only the render kind differs.
 async fn bootstrap(
-    State(server): State<AgentmemServer>,
+    State(server): State<MuninnServer>,
     grant: Option<Extension<Grant>>,
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
@@ -192,7 +192,7 @@ async fn bootstrap(
 /// binding, response negotiation, auth gate, and error mapping with
 /// `GET /v1/context`. The JSON form carries an empty `missing` list.
 async fn layout(
-    State(server): State<AgentmemServer>,
+    State(server): State<MuninnServer>,
     grant: Option<Extension<Grant>>,
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
@@ -213,7 +213,7 @@ async fn layout(
 /// renderer's own validation (`MissingScope` / `InvalidArgument`). Shared by the
 /// three `/v1/*` render endpoints.
 fn bind_scope(
-    server: &AgentmemServer,
+    server: &MuninnServer,
     grant: Option<Extension<Grant>>,
     params: &HashMap<String, String>,
 ) -> Result<(BTreeMap<String, String>, Grant), Box<Response>> {
@@ -249,12 +249,12 @@ fn render_payload(headers: &HeaderMap, rendered: String, missing: Vec<String>) -
 
 /// Map a render error to an HTTP response with the shared `{ "error": … }` shape:
 /// scope-validation errors to `400`, grant denials to `403`, IO failures to `500`.
-fn render_error(err: AgentmemError) -> Response {
+fn render_error(err: MuninnError) -> Response {
     let status = match err {
-        AgentmemError::MissingScope { .. } | AgentmemError::InvalidArgument { .. } => {
+        MuninnError::MissingScope { .. } | MuninnError::InvalidArgument { .. } => {
             StatusCode::BAD_REQUEST
         }
-        AgentmemError::ScopeDenied { .. } => StatusCode::FORBIDDEN,
+        MuninnError::ScopeDenied { .. } => StatusCode::FORBIDDEN,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     error(status, err.to_string())
@@ -275,7 +275,7 @@ fn error(status: StatusCode, message: String) -> Response {
 
 /// The authentication configuration for the gated routes: the optional static
 /// bearer (which carries the all-scopes grant) plus the optional per-token
-/// grant table from `AGENTMEM_HTTP_TOKENS_FILE`.
+/// grant table from `MUNINN_HTTP_TOKENS_FILE`.
 struct HttpAuth {
     static_bearer: Option<String>,
     tokens: Option<TokenGrants>,

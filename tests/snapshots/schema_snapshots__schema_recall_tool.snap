@@ -70,7 +70,7 @@ expression: "recall_schema_for(\"<agent>.<user>\")"
         ]
       },
       "modified_after": {
-        "description": "Include only notes modified at or after this time. Accepts an RFC 3339\ntimestamp, or a bare `YYYY-MM-DD` date interpreted as start of day in the\nconfigured `AGENTMEM_TIMEZONE`. Bounds are half-open\n(`modified_after ≤ mtime < modified_before`) and compare the filesystem\nmtime, which restores and sync tools may have back-dated. Counts as a\nsufficient predicate on its own: with no `query`/`regex`/`filters`, hits\nare ordered by `modified_at` descending with `score: 1.0` and empty\n`snippets`.",
+        "description": "Include only notes modified at or after this time. Accepts an RFC 3339\ntimestamp, or a bare `YYYY-MM-DD` date interpreted as start of day in the\nconfigured `MUNINN_TIMEZONE`. Bounds are half-open\n(`modified_after ≤ mtime < modified_before`) and compare the filesystem\nmtime, which restores and sync tools may have back-dated. Counts as a\nsufficient predicate on its own: with no `query`/`regex`/`filters`, hits\nare ordered by `modified_at` descending with `score: 1.0` and empty\n`snippets`.",
         "type": [
           "string",
           "null"

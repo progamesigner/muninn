@@ -1,22 +1,22 @@
 [package]
-name = "agentmem"
+name = "muninn"
 version = "0.8.1"
 edition = "2024"
 description = "An MCP server fronting a plain-markdown vault for multi-tenant agent memory."
 authors = ["Yang Sheng Han <progamesigner@gmail.com>"]
 license = "MIT"
-repository = "https://github.com/progamesigner/agentmem"
-homepage = "https://github.com/progamesigner/agentmem"
-documentation = "https://github.com/progamesigner/agentmem#readme"
+repository = "https://github.com/progamesigner/muninn"
+homepage = "https://github.com/progamesigner/muninn"
+documentation = "https://github.com/progamesigner/muninn#readme"
 readme = "README.md"
 rust-version = "1.95"
 
 [[bin]]
-name = "agentmem"
+name = "muninn"
 path = "src/main.rs"
 
 [lib]
-name = "agentmem"
+name = "muninn"
 path = "src/lib.rs"
 
 [features]

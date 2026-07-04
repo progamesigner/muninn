@@ -1,7 +1,7 @@
-//! `agentmem` — an MCP server fronting a plain-markdown vault for
+//! `muninn` — an MCP server fronting a plain-markdown vault for
 //! multi-tenant agent memory.
 //!
-//! See `openspec/changes/build-agentmem-mcp-server/` for the full specification.
+//! See `openspec/changes/build-muninn-mcp-server/` for the full specification.
 
 pub mod config;
 pub mod error;
@@ -19,5 +19,5 @@ pub mod tools;
 pub mod transport;
 pub mod wikilink;
 
-pub use error::{AgentmemError, ErrorCode};
-pub use mcp::AgentmemServer;
+pub use error::{ErrorCode, MuninnError};
+pub use mcp::MuninnServer;
