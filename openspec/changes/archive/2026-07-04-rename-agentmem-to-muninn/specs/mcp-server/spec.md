@@ -1,8 +1,5 @@
-# mcp-server Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change build-agentmem-mcp-server. Update Purpose after archive.
-## Requirements
 ### Requirement: Server binary lifecycle
 The system SHALL ship a single Rust binary `muninn` that, on launch, reads configuration from the environment, initialises logging to the correct sink for the selected transport, registers all tools with the `rmcp` server, and begins serving requests until terminated by a signal.
 
@@ -37,17 +34,6 @@ The system SHALL select its transport based on the `MUNINN_TRANSPORT` environmen
 - **WHEN** `MUNINN_TRANSPORT` is set to any value other than `stdio` or `http`
 - **THEN** the server exits with a non-zero status and writes a stderr message that names the accepted values
 
-### Requirement: Stdio output discipline
-The system SHALL guarantee that, when running under stdio transport, no byte that is not a valid JSON-RPC frame is ever written to stdout.
-
-#### Scenario: Logs go to stderr under stdio
-- **WHEN** the server is running under stdio and emits a log line at any level
-- **THEN** the line is written to stderr and stdout receives only the bytes that constitute MCP JSON-RPC frames
-
-#### Scenario: Panics do not corrupt stdout
-- **WHEN** an internal panic occurs in a tool handler
-- **THEN** the panic message is written to stderr, the JSON-RPC response sent on stdout is a well-formed MCP error, and the server continues serving subsequent requests
-
 ### Requirement: Tool registration and listing
 The system SHALL register the following nine tools with the MCP server and advertise them through `tools/list`: `list_memory_notes`, `read_memory_note`, `write_memory_note`, `edit_memory_note`, `delete_memory_note`, `load_session_context`, `evolve_core_persona`, `update_task_heartbeat`, `append_diary_entry`.
 
@@ -66,17 +52,6 @@ The system SHALL register the following nine tools with the MCP server and adver
 #### Scenario: Empty scheme removes scope fields from schemas
 - **WHEN** the server is started with `MUNINN_VFS_SCHEME=` (empty) and a client calls `tools/list`
 - **THEN** the input schemas for every tool include no scope parameters at all
-
-### Requirement: Error reporting at the MCP boundary
-The system SHALL map every internal error into an MCP tool result that contains a human-readable `text` message and a structured `code` discriminator. Raw OS error messages SHALL NOT be passed through verbatim.
-
-#### Scenario: Policy violation returns a structured error
-- **WHEN** a tool call is rejected because it tries to write to a `shared_readonly` path
-- **THEN** the tool result is an MCP error whose text is of the form "write denied: path '...' is in a read-only region" and whose `code` field is `write_denied`
-
-#### Scenario: Missing file
-- **WHEN** `read_workspace_file` is called with a virtual path that resolves to a non-existent file
-- **THEN** the tool result is an MCP error with code `not_found` and a message that includes the virtual path the client supplied (never the resolved physical path)
 
 ### Requirement: HTTP transport static authentication
 The system SHALL, when running under `http` transport, optionally require an `Authorization: Bearer <token>` header matching `MUNINN_HTTP_BEARER`. The static bearer SHALL carry an all-scopes grant: requests presenting it may name any scope. When both `MUNINN_HTTP_BEARER` and `MUNINN_HTTP_TOKENS_FILE` are unset, no authentication is enforced and a startup warning is logged; when either is set, requests without an acceptable bearer SHALL be rejected.
@@ -113,30 +88,6 @@ This makes the HTTP transport usable behind a Kubernetes Service or ingress, whe
 #### Scenario: Validation disabled by wildcard
 - **WHEN** the server runs under `http` transport with `MUNINN_HTTP_ALLOWED_HOSTS=*` and a client sends a request carrying any `Host` header
 - **THEN** the transport accepts the request without `Host` validation
-
-### Requirement: HTTP transport stateless JSON responses
-The system SHALL, when running under `http` transport, configure the `rmcp` Streamable HTTP service in stateless mode with direct JSON responses (`stateful_mode = false`, `json_response = true`). Each `POST /mcp` request SHALL be handled independently and its JSON-RPC response returned with `Content-Type: application/json`, not `text/event-stream`. The server SHALL NOT issue an `mcp-session-id` header and SHALL NOT depend on a per-session SSE event stream for delivering responses or notifications, consistent with its advertised capabilities (no `listChanged`, no `subscribe`).
-
-This matches the server's request→response semantics — every tool call resolves synchronously and the server never initiates messages — and avoids the SSE-on-POST response shape and `GET /mcp` resume churn that break clients which do not consume server-streamed responses.
-
-#### Scenario: Tool call returns a JSON response
-- **WHEN** a client completes the `initialize` handshake and sends a `tools/call` request to `POST /mcp` with `Accept: application/json, text/event-stream`
-- **THEN** the server responds with `Content-Type: application/json` carrying the single JSON-RPC result, and the connection closes without an SSE event stream
-
-#### Scenario: No session id is issued
-- **WHEN** a client sends an `initialize` request to `POST /mcp`
-- **THEN** the response does NOT include an `mcp-session-id` header and subsequent requests are accepted without one
-
-### Requirement: Resources and prompts capability advertisement
-The system SHALL advertise the resources and prompts capabilities during the MCP `initialize` handshake, in addition to tools, so that clients discover the `session-context`, `session-bootstrap`, and `session-layout` resources and the `session-context` prompt.
-
-#### Scenario: Capabilities include resources and prompts
-- **WHEN** an MCP client completes the `initialize` handshake
-- **THEN** the server's advertised capabilities include both resources and prompts alongside tools
-
-#### Scenario: Resource templates list all three session resources
-- **WHEN** a client calls `resources/templates/list`
-- **THEN** the listed resources include `session-context`, `session-bootstrap`, and `session-layout`, each at its scheme-parameterized templated URI
 
 ### Requirement: `session-context` resource
 The system SHALL expose a `session-context` resource at the templated URI `muninn://session-context/{…}`, registered through `resources/templates/list`, whose URI parameters are derived, in order, from the configured scheme's placeholders. A `resources/read` of a concrete URI SHALL return the rendered session-context (produced by the shared renderer) as the resource contents for the scope encoded in the URI.

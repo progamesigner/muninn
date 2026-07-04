@@ -1,8 +1,5 @@
-# configuration Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change build-agentmem-mcp-server. Update Purpose after archive.
-## Requirements
 ### Requirement: Configuration source
 The system SHALL be configured exclusively via environment variables. CLI flags MAY be accepted as overrides, but the canonical configuration surface is the environment.
 

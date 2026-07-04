@@ -1,8 +1,5 @@
-# vault-storage Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change build-agentmem-mcp-server. Update Purpose after archive.
-## Requirements
 ### Requirement: Vault root containment
 The system SHALL canonicalise every virtual path against the configured vault root and SHALL reject any resolution whose canonical absolute path is not a descendant of that root.
 
@@ -98,25 +95,6 @@ The system SHALL enforce permissions according to `MUNINN_POLICY` and the region
 - **WHEN** policy is `readwrite` and an agent writes to `Scratch/team-notes.md`
 - **THEN** the write succeeds, the file is created or replaced at `<root>/Scratch/team-notes.md` without a suffix, and every other agent can read it at the same virtual path
 
-### Requirement: Own-scope strictness inside the agents folder
-Inside the agents folder, when the scheme is non-empty, the system SHALL only allow read, write, edit, and list operations on files whose physical path's rendered suffix matches the caller's rendered suffix. Files belonging to other scopes SHALL be invisible (absent from listings) AND inaccessible (any direct attempt to address them resolves to `not_found`).
-
-#### Scenario: Other scope's file is unreachable
-- **WHEN** the resolver is invoked for scope `{agent:"jarvis", user:"tony"}` on virtual path `tasks/plan.md` and the only file on disk in that directory is `plan.jarvis.sam.md`
-- **THEN** the operation is refused with code `not_found` (the resolved file for the caller is `plan.jarvis.tony.md`, which does not exist) and `plan.jarvis.sam.md` is NOT read
-
-#### Scenario: Crafted virtual path cannot reach other scope
-- **WHEN** an agent in scope `{agent:"jarvis", user:"tony"}` attempts to address another scope's physical file by passing a virtual path that includes the other scope's suffix in the stem (e.g. `tasks/plan.jarvis.sam.md`)
-- **THEN** the resolver applies the caller's own suffix on top, producing `plan.jarvis.sam.md.jarvis.tony.md` which does not exist and is reported as `not_found`; under no input does the resolver ever open another scope's file
-
-#### Scenario: Listing only shows own scope
-- **WHEN** `list_workspace_files` is called for scope `{agent:"jarvis", user:"tony"}` and the disk contains files for `jarvis.tony`, `jarvis.sam`, and `friday.tony` under the agents folder
-- **THEN** only the `jarvis.tony` files appear in the result, with suffixes stripped
-
-#### Scenario: Empty scheme removes own-scope filtering
-- **WHEN** scheme is the empty string, policy is `namespaced`, and `list_workspace_files` is called
-- **THEN** all files inside the agents folder are listed (there are no per-scope subdirectories or suffixes to filter by)
-
 ### Requirement: Visibility filters
 The system SHALL, on every list / read / write / edit / delete operation, apply visibility filters that exclude (a) any path whose any segment begins with `.` when `MUNINN_INCLUDE_HIDDEN=false` (the default) AND the path is not exempted by the include-hidden glob list, and (b) any path matched by an applicable `.ignore`, `.gitignore`, or `.obsidianignore` rule inside the vault when `MUNINN_HONOR_IGNORE_FILES=true` (the default). Ignore files SHALL be honoured **per-directory and nested**, exactly as `git` treats `.gitignore`: a file in any subfolder applies to that subtree and composes with files in ancestor directories, with the rules assembled from the vault root down to the target's parent directory. This composition SHALL apply to all three ignore-file kinds on both the listing path and the direct-access path. The walker semantics SHALL match the `ignore` crate's `WalkBuilder` so per-directory ignore files compose as in `ripgrep` and Obsidian's own search. The set of files excluded by direct read/write/edit/delete checks SHALL be identical to the set the walker hides from listings (the visible set and the addressable set agree for all three ignore-file kinds).
 
@@ -162,92 +140,3 @@ An include-hidden glob list (configured via `MUNINN_INCLUDE_HIDDEN_GLOBS`) SHALL
 #### Scenario: Agents folder itself never filtered out
 - **WHEN** `MUNINN_AGENTS_DIR=.agents` (begins with `.`) and `MUNINN_INCLUDE_HIDDEN=false`
 - **THEN** the agents folder is still recognised as the scoped/suffixed region and its contents remain visible to and writable by the owning scope; hidden filtering does NOT exclude the agents folder, independent of any include-hidden glob list
-### Requirement: Atomic full-file writes
-The system SHALL implement every full-file write as: create a temp file in the same directory as the target, write contents to the temp file, fsync, then rename the temp file over the target.
-
-#### Scenario: Crash during write leaves target intact
-- **WHEN** the server is killed after writing the temp file but before the rename completes
-- **THEN** the target file on disk is unchanged from its prior contents (or absent if it never existed)
-
-#### Scenario: Successful write replaces target atomically
-- **WHEN** `write_workspace_file` succeeds
-- **THEN** the target file at the resolved physical path contains exactly the bytes supplied by the caller and no other file is created in the parent directory
-
-### Requirement: Edit precondition uniqueness
-The system SHALL refuse an `edit_workspace_file` call whose `search_string` occurs zero times or more than once in the current target file.
-
-#### Scenario: Search string occurs once
-- **WHEN** the search string appears exactly once in the file
-- **THEN** the server replaces that single occurrence and persists the result via the atomic write procedure
-
-#### Scenario: Search string is missing
-- **WHEN** the search string does not appear in the file
-- **THEN** the call is rejected with code `edit_search_not_found` and the file is unchanged
-
-#### Scenario: Search string is ambiguous
-- **WHEN** the search string appears two or more times in the file
-- **THEN** the call is rejected with code `edit_search_ambiguous`, the file is unchanged, and the error message advises the client to provide a longer, unique snippet
-
-### Requirement: Auto-create parent directories on writes
-The system SHALL create any missing parent directories along the physical path during a write inside the agents folder before opening the temp file. For writes outside the agents folder (only possible under `readwrite` policy), parent directories SHALL likewise be auto-created.
-
-#### Scenario: First write into a new scope
-- **WHEN** `write_workspace_file` is called for a virtual path inside the agents folder and no directory for the caller's rendered suffix yet exists on disk
-- **THEN** the server creates the per-scope directory tree and then performs the atomic write
-
-#### Scenario: First write outside the agents folder under readwrite
-- **WHEN** policy is `readwrite` and `write_workspace_file` is called for `Scratch/team/notes.md` where `Scratch/team/` does not yet exist
-- **THEN** the server creates the directory tree and then performs the atomic write
-
-### Requirement: Own-scope strictness extends to link targets in content
-
-The own-scope strictness guarantee SHALL extend from filenames to link targets
-embedded in note content. Inside the agents folder with a non-empty scheme, a
-suffixed link target persisted in a note SHALL carry only the owning scope's
-rendered suffix, and the system SHALL never persist a link bearing another scope's
-suffix in a file readable by a different scope.
-
-#### Scenario: Persisted own-scope link carries only the owner's suffix
-- **WHEN** scope `{agent:"jarvis", user:"tony"}` writes an own-scope note linking
-  to its own `rust.md`
-- **THEN** the persisted link target is `rust.jarvis.tony` and contains no other
-  scope's suffix
-
-#### Scenario: A scoped suffix is never persisted in a shared file
-- **WHEN** any caller writes a file in the shared region whose content links to a
-  note in that caller's own scope
-- **THEN** the write is refused before any bytes are written, so no scoped suffix
-  is ever persisted in a shared file
-
-### Requirement: Link transform respects visibility filters
-
-Link resolution SHALL only consider notes that pass the existing visibility
-filters (hidden-segment and ignore-file rules). A note excluded by those filters
-SHALL NOT be a resolution candidate and SHALL be treated as outside the caller's
-visible set.
-
-#### Scenario: Ignored note is not a link target
-- **WHEN** a `.gitignore` rule excludes `drafts/wip.md` and the caller writes a
-  note containing `[[wip]]` with no other matching note
-- **THEN** `wip` does not resolve (the excluded note is not a candidate) and the
-  link is left verbatim as dangling
-
-### Requirement: Own-scope strictness extends to recall results
-The own-scope strictness guarantee SHALL extend to content recall: a
-`recall_memory_notes` result — its hit paths, scores, and snippets — SHALL only ever
-derive from notes in the caller's own scope or the shared region the active policy
-permits. Because recall is backed by per-scope in-memory indexes, content from
-another scope SHALL be structurally unreachable by a recall query, not merely
-filtered out, and ignored/hidden notes SHALL never enter any index.
-
-#### Scenario: Recall cannot cross a scope boundary
-- **WHEN** a recall is issued for scope `{agent:"jarvis", user:"tony"}` and the vault
-  contains matching notes for `jarvis.sam`
-- **THEN** the query opens only tony's index (and the shared index when permitted),
-  so no byte of `jarvis.sam`'s content can appear in any hit, path, or snippet
-
-#### Scenario: Ignored content stays out of the index
-- **WHEN** a note is excluded by an active `.gitignore`/`.obsidianignore`/`.ignore`
-  rule or by hidden filtering
-- **THEN** it is never indexed and never returned by recall, consistent with how it is
-  hidden from `list_memory_notes` and `read_memory_note`
