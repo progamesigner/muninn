@@ -260,6 +260,14 @@ impl RecallEngine {
         if state.built {
             return;
         }
+        // Timed here rather than in `warm()` so the inline build-on-first-query
+        // path is measured identically to the background warmup, and so repeated
+        // calls after the build stay silent.
+        let started = Instant::now();
+        tracing::info!(
+            backend = self.effective.as_str(),
+            "recall index build started"
+        );
         // Shared region (absent when the agents folder is the vault root).
         if !self.storage.resolver().agents_dir().as_str().is_empty() {
             let mut idx = self.new_region_index(IndexRegion::Shared);
@@ -282,6 +290,7 @@ impl RecallEngine {
         tracing::info!(
             backend = self.effective.as_str(),
             scopes = state.scopes.len(),
+            elapsed = ?started.elapsed(),
             "recall index ready"
         );
     }
@@ -853,6 +862,11 @@ mod tests {
         engine.warm();
         assert!(engine.is_ready());
     }
+
+    // The build's start/ready log lines are asserted in
+    // `tests/recall_build_logs.rs` — a dedicated test binary, because `tracing`
+    // caches callsite interest process-wide and the other tests in this module
+    // hit the same callsites with no subscriber installed.
 
     #[test]
     fn resident_scope_count_tracks_the_warm_build() {

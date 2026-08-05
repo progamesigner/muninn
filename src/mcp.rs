@@ -216,6 +216,21 @@ fn to_mcp_error(err: MuninnError) -> McpError {
     McpError::invalid_params(err.to_string(), data)
 }
 
+/// Map a blocking-task join failure — a panicking handler, or a cancelled task
+/// during shutdown — onto a protocol-level internal error. Keeps the "a panic
+/// does not corrupt the transport" guarantee now that dispatch runs off-runtime.
+fn to_join_error(err: tokio::task::JoinError) -> McpError {
+    McpError::internal_error(format!("handler failed: {err}"), None)
+}
+
+/// Which render a `muninn://…` resource URI selects. Resolved from the URI
+/// prefix on the async side so the blocking closure carries only owned data.
+enum ResourceRender {
+    Context,
+    Bootstrap,
+    Layout,
+}
+
 /// The scope grant the HTTP auth middleware resolved for this request, read
 /// back out of the propagated `http::request::Parts` extension. Absent parts or
 /// grant — the stdio transport, or HTTP with no authentication configured —
@@ -299,11 +314,23 @@ impl ServerHandler for MuninnServer {
     ) -> Result<CallToolResult, McpError> {
         let args: JsonObject = request.arguments.unwrap_or_default();
         let grant = request_grant(&context);
-        match self.toolbox.call(&request.name, &args, &grant) {
+        let toolbox = Arc::clone(&self.toolbox);
+        let name = request.name;
+        // The toolbox is fully synchronous: vault IO, the recall engine's mutex,
+        // and index commits all block. Dispatching it on the blocking pool keeps
+        // long calls (a cold index build, a large reconcile) off the runtime's
+        // workers, so `GET /healthz` and every other future stay schedulable.
+        let (name, outcome) = tokio::task::spawn_blocking(move || {
+            let outcome = toolbox.call(&name, &args, &grant);
+            (name, outcome)
+        })
+        .await
+        .map_err(to_join_error)?;
+        match outcome {
             Some(Ok(result)) => Ok(result),
             Some(Err(err)) => Ok(err.into_tool_result()),
             None => Err(McpError::invalid_params(
-                format!("unknown tool '{}'", request.name),
+                format!("unknown tool '{name}'"),
                 None,
             )),
         }
@@ -363,29 +390,41 @@ impl ServerHandler for MuninnServer {
     ) -> Result<ReadResourceResult, McpError> {
         let grant = request_grant(&context);
         // Dispatch by URI prefix to the matching render. Longest/most-specific is
-        // unambiguous: the three prefixes share no common tail.
-        let rendered = if request.uri.starts_with(SESSION_BOOTSTRAP_URI_PREFIX) {
-            let scope = self.scope_from_uri(SESSION_BOOTSTRAP_URI_PREFIX, &request.uri)?;
-            self.toolbox
+        // unambiguous: the three prefixes share no common tail. URI parsing is
+        // cheap and stays inline; only the vault-reading render moves off-runtime.
+        let (render, scope) = if request.uri.starts_with(SESSION_BOOTSTRAP_URI_PREFIX) {
+            (
+                ResourceRender::Bootstrap,
+                self.scope_from_uri(SESSION_BOOTSTRAP_URI_PREFIX, &request.uri)?,
+            )
+        } else if request.uri.starts_with(SESSION_LAYOUT_URI_PREFIX) {
+            (
+                ResourceRender::Layout,
+                self.scope_from_uri(SESSION_LAYOUT_URI_PREFIX, &request.uri)?,
+            )
+        } else {
+            (
+                ResourceRender::Context,
+                self.scope_from_uri(SESSION_CONTEXT_URI_PREFIX, &request.uri)?,
+            )
+        };
+        let toolbox = Arc::clone(&self.toolbox);
+        let rendered = tokio::task::spawn_blocking(move || match render {
+            ResourceRender::Bootstrap => toolbox
                 .render_session_context(
                     &scope,
                     &grant,
                     crate::session_context::RenderKind::Bootstrap,
                 )
-                .map_err(to_mcp_error)?
-                .rendered
-        } else if request.uri.starts_with(SESSION_LAYOUT_URI_PREFIX) {
-            let scope = self.scope_from_uri(SESSION_LAYOUT_URI_PREFIX, &request.uri)?;
-            self.toolbox
-                .render_layout(&scope, &grant)
-                .map_err(to_mcp_error)?
-        } else {
-            let scope = self.scope_from_uri(SESSION_CONTEXT_URI_PREFIX, &request.uri)?;
-            self.toolbox
+                .map(|sc| sc.rendered),
+            ResourceRender::Layout => toolbox.render_layout(&scope, &grant),
+            ResourceRender::Context => toolbox
                 .render_session_context(&scope, &grant, crate::session_context::RenderKind::Context)
-                .map_err(to_mcp_error)?
-                .rendered
-        };
+                .map(|sc| sc.rendered),
+        })
+        .await
+        .map_err(to_join_error)?
+        .map_err(to_mcp_error)?;
         Ok(ReadResourceResult::new(vec![ResourceContents::text(
             rendered,
             request.uri,
@@ -428,18 +467,77 @@ impl ServerHandler for MuninnServer {
             ));
         }
         let scope = self.scope_from_prompt_args(&request.arguments)?;
-        let sc = self
-            .toolbox
-            .render_session_context(
+        let grant = request_grant(&context);
+        let toolbox = Arc::clone(&self.toolbox);
+        let sc = tokio::task::spawn_blocking(move || {
+            toolbox.render_session_context(
                 &scope,
-                &request_grant(&context),
+                &grant,
                 crate::session_context::RenderKind::Context,
             )
-            .map_err(to_mcp_error)?;
+        })
+        .await
+        .map_err(to_join_error)?
+        .map_err(to_mcp_error)?;
         Ok(GetPromptResult::new(vec![PromptMessage::new_text(
             PromptMessageRole::User,
             sc.rendered,
         )])
         .with_description("Session-context bootstrap."))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A handler that panics must surface as a well-formed protocol error rather
+    /// than tear down the transport. Now that dispatch runs on the blocking pool,
+    /// the panic reaches the handler as a [`tokio::task::JoinError`] — this drives
+    /// a real panicking blocking task through the same `spawn_blocking(…).await`
+    /// seam the three handlers use and checks the mapping. (The handlers
+    /// themselves are not called directly: `RequestContext<RoleServer>` is only
+    /// constructible inside rmcp's dispatch, so the end-to-end path is covered by
+    /// the transport integration tests.)
+    #[tokio::test]
+    async fn a_panicking_blocking_task_maps_to_an_internal_error() {
+        let joined = tokio::task::spawn_blocking(|| -> Option<CallToolResult> {
+            panic!("handler exploded");
+        })
+        .await;
+        let err = to_join_error(joined.expect_err("the panicking task must not join cleanly"));
+
+        assert_eq!(err.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert!(
+            err.message.starts_with("handler failed: "),
+            "unexpected message: {}",
+            err.message
+        );
+        // Well-formed on the wire: serializes to a JSON-RPC error object.
+        let wire = serde_json::to_value(&err).expect("error serializes");
+        assert_eq!(wire["code"], -32603);
+        assert!(wire["message"].is_string());
+
+        // The panic stayed inside the blocking pool — the runtime is still usable.
+        assert_eq!(
+            tokio::task::spawn_blocking(|| 7)
+                .await
+                .expect("still alive"),
+            7
+        );
+    }
+
+    /// A cancelled dispatch (the runtime shutting down under a blocked call) takes
+    /// the same mapping rather than panicking the handler.
+    #[tokio::test]
+    async fn a_cancelled_blocking_task_maps_to_an_internal_error() {
+        let handle = tokio::task::spawn(std::future::pending::<()>());
+        handle.abort();
+        let err = to_join_error(
+            handle
+                .await
+                .expect_err("aborted task must not join cleanly"),
+        );
+        assert_eq!(err.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
     }
 }

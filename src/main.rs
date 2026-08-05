@@ -31,7 +31,12 @@ fn main() -> anyhow::Result<()> {
 
     let server = MuninnServer::new(&config);
 
+    // Floor the worker count at two. The default follows the cgroup CPU quota, so
+    // a container limited to 1 CPU gets a single worker — and one future that
+    // blocks inline then halts the whole scheduler, including the liveness probe.
+    let workers = std::thread::available_parallelism().map_or(2, |n| n.get().max(2));
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
         .enable_all()
         .build()?;
     runtime.block_on(async move { transport::serve(&config, server).await })

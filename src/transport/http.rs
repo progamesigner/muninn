@@ -163,9 +163,16 @@ async fn context(
         Ok(bound) => bound,
         Err(resp) => return *resp,
     };
-    match server.render_session_context(&scope, &grant, RenderKind::Context) {
-        Ok(sc) => render_payload(&headers, sc.rendered, sc.missing),
-        Err(err) => render_error(err),
+    // The renderer reads the vault synchronously; keep it off the runtime's
+    // workers so a slow read cannot stall the probes or other requests.
+    let rendered = tokio::task::spawn_blocking(move || {
+        server.render_session_context(&scope, &grant, RenderKind::Context)
+    })
+    .await;
+    match rendered {
+        Ok(Ok(sc)) => render_payload(&headers, sc.rendered, sc.missing),
+        Ok(Err(err)) => render_error(err),
+        Err(err) => join_error(err),
     }
 }
 
@@ -182,9 +189,14 @@ async fn bootstrap(
         Ok(bound) => bound,
         Err(resp) => return *resp,
     };
-    match server.render_session_context(&scope, &grant, RenderKind::Bootstrap) {
-        Ok(sc) => render_payload(&headers, sc.rendered, sc.missing),
-        Err(err) => render_error(err),
+    let rendered = tokio::task::spawn_blocking(move || {
+        server.render_session_context(&scope, &grant, RenderKind::Bootstrap)
+    })
+    .await;
+    match rendered {
+        Ok(Ok(sc)) => render_payload(&headers, sc.rendered, sc.missing),
+        Ok(Err(err)) => render_error(err),
+        Err(err) => join_error(err),
     }
 }
 
@@ -201,9 +213,11 @@ async fn layout(
         Ok(bound) => bound,
         Err(resp) => return *resp,
     };
-    match server.render_layout(&scope, &grant) {
-        Ok(rendered) => render_payload(&headers, rendered, Vec::new()),
-        Err(err) => render_error(err),
+    let rendered = tokio::task::spawn_blocking(move || server.render_layout(&scope, &grant)).await;
+    match rendered {
+        Ok(Ok(rendered)) => render_payload(&headers, rendered, Vec::new()),
+        Ok(Err(err)) => render_error(err),
+        Err(err) => join_error(err),
     }
 }
 
@@ -258,6 +272,15 @@ fn render_error(err: MuninnError) -> Response {
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     error(status, err.to_string())
+}
+
+/// Map a blocking-task join failure — a panicking render, or cancellation during
+/// shutdown — onto a `500` with the shared `{ "error": … }` shape.
+fn join_error(err: tokio::task::JoinError) -> Response {
+    error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("render failed: {err}"),
+    )
 }
 
 /// `true` when the `Accept` header asks for `application/json`.
