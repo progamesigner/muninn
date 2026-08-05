@@ -1,6 +1,6 @@
 [package]
 name = "muninn"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 description = "An MCP server fronting a plain-markdown vault for multi-tenant agent memory."
 authors = ["Yang Sheng Han <progamesigner@gmail.com>"]
