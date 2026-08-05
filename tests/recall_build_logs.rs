@@ -95,6 +95,7 @@ fn the_build_logs_a_start_line_and_a_ready_line_carrying_elapsed() {
         regex_scan_byte_cap: usize::MAX,
         max_resident_scopes: 256,
         freshness: Duration::from_secs(3600),
+        index_dir: None,
     };
     let engine = RecallEngine::new(storage, config).unwrap();
 

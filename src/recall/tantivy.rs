@@ -1,77 +1,220 @@
 //! The opt-in tantivy recall backend (the `recall-tantivy` feature).
 //!
-//! Holds an in-RAM tantivy index (a `RamDirectory`) per region — nothing is
-//! written to disk. Full-text `query` is BM25-ranked with snippet generation;
-//! `regex` and frontmatter property `filters` are applied as a post-filter over
-//! the candidate documents (BM25 results when a text query narrows the set, or a
-//! bounded full scan otherwise). Frontmatter properties are parsed at index time
-//! and stored as JSON for filtering.
+//! Holds one tantivy index per region: in RAM (a `RamDirectory`, writing nothing
+//! to disk) by default, or memory-mapped under a region directory when the
+//! operator configures persistence. Full-text `query` is BM25-ranked with snippet
+//! generation; `regex` and frontmatter property `filters` are applied as a
+//! post-filter over the candidate documents (BM25 results when a text query
+//! narrows the set, or a bounded full scan otherwise). Frontmatter properties are
+//! parsed at index time and stored as JSON for filtering.
+//!
+//! Persistence carries its own manifest: every document records its source file's
+//! mtime and size in the index, so opening a persisted index recovers exactly the
+//! stat-diff bookkeeping the engine needs — no sidecar file, and tantivy's atomic
+//! commits keep index and manifest impossible to desync. Any failure along the
+//! persistent open path (unreadable directory, schema mismatch, held writer lock,
+//! unreadable metadata) funnels into one fallback: warn, wipe the index, and start
+//! empty, which is just the cold path of a normal build.
+
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use tantivy::collector::TopDocs;
+use tantivy::directory::MmapDirectory;
 use tantivy::query::{AllQuery, QueryParser};
-use tantivy::schema::{Field, STORED, STRING, Schema, TEXT, TantivyDocument, Value};
+use tantivy::schema::{FAST, Field, STORED, STRING, Schema, TEXT, TantivyDocument, Value as _};
 use tantivy::snippet::SnippetGenerator;
-use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, Term};
+use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyError, Term};
 
 use crate::frontmatter;
 
 use super::{
     BackendIndex, CompiledQuery, FilterOp, MAX_SNIPPET_LEN, MAX_SNIPPETS, PropertyFilter, RawHit,
-    ScanResult,
+    RecoveredDoc, ScanResult, SourceMeta,
 };
 
 /// Writer heap budget; tantivy requires a few MiB minimum.
 const WRITER_HEAP: usize = 30_000_000;
 
-pub(crate) struct TantivyIndex {
-    index: Index,
-    writer: IndexWriter,
-    reader: IndexReader,
+/// The schema's field handles, resolved by name so an index opened from disk is
+/// read through its own schema rather than through positional assumptions.
+struct Fields {
     path: Field,
     path_text: Field,
     body: Field,
     props_json: Field,
+    mtime: Field,
+    size: Field,
+}
+
+/// Build the recall schema. Any change here must bump
+/// [`super::persist::INDEX_FORMAT_VERSION`], since persisted indexes carry it.
+fn schema() -> Schema {
+    let mut builder = Schema::builder();
+    // `path`: stored clean virtual path, and the unique key for upsert/delete. Also
+    // a fast (columnar) field, so manifest recovery can read every path without
+    // touching the document store — see `recover_manifest`.
+    builder.add_text_field("path", (STRING | STORED).set_fast(None));
+    // `path_text`: the same clean path, tokenized so `query`/`regex` match it
+    // like the body (the `path` STRING field stays the exact upsert/delete key).
+    builder.add_text_field("path_text", TEXT);
+    // `body`: frontmatter-stripped prose, BM25-indexed and stored for snippets.
+    builder.add_text_field("body", TEXT | STORED);
+    // `props_json`: the serialized frontmatter properties, stored for post-filtering.
+    builder.add_text_field("props_json", STORED);
+    // `mtime`/`size`: the source file's stat metadata. Never queried — they exist
+    // only to rebuild the reconcile manifest when a persisted index is reopened, so
+    // they are columnar (`FAST`) rather than stored: recovery then reads three
+    // columns instead of decompressing every document's body.
+    builder.add_u64_field("mtime", FAST);
+    builder.add_u64_field("size", FAST);
+    builder.build()
+}
+
+impl Fields {
+    /// Resolve every field by name; a missing field means a foreign schema.
+    fn resolve(schema: &Schema) -> Result<Fields, TantivyError> {
+        Ok(Fields {
+            path: schema.get_field("path")?,
+            path_text: schema.get_field("path_text")?,
+            body: schema.get_field("body")?,
+            props_json: schema.get_field("props_json")?,
+            mtime: schema.get_field("mtime")?,
+            size: schema.get_field("size")?,
+        })
+    }
+}
+
+pub(crate) struct TantivyIndex {
+    index: Index,
+    writer: IndexWriter,
+    reader: IndexReader,
+    fields: Fields,
 }
 
 impl TantivyIndex {
-    pub(crate) fn new() -> TantivyIndex {
-        let mut builder = Schema::builder();
-        // `path`: stored clean virtual path, and the unique key for upsert/delete.
-        let path = builder.add_text_field("path", STRING | STORED);
-        // `path_text`: the same clean path, tokenized so `query`/`regex` match it
-        // like the body (the `path` STRING field stays the exact upsert/delete key).
-        let path_text = builder.add_text_field("path_text", TEXT);
-        // `body`: frontmatter-stripped prose, BM25-indexed and stored for snippets.
-        let body = builder.add_text_field("body", TEXT | STORED);
-        // `props_json`: the serialized frontmatter properties, stored for post-filtering.
-        let props_json = builder.add_text_field("props_json", STORED);
-        let schema = builder.build();
+    /// Open a region's index. `None` keeps it in RAM (nothing on disk, no
+    /// documents to recover); `Some(dir)` memory-maps it under `dir`, returning the
+    /// documents found there so the caller can seed its reconcile manifest.
+    pub(crate) fn new(region_dir: Option<PathBuf>) -> (TantivyIndex, Vec<RecoveredDoc>) {
+        let Some(dir) = region_dir else {
+            return (Self::in_ram(), Vec::new());
+        };
+        match Self::open_persistent(&dir) {
+            Ok(opened) => opened,
+            Err(err) => {
+                tracing::warn!(
+                    dir = %dir.display(),
+                    %err,
+                    "persisted recall index could not be opened; discarding it and rebuilding from the vault"
+                );
+                // The one fallback for every persistence failure: wipe, reopen
+                // empty, and let the caller's stat-diff index everything.
+                let wiped = super::persist::wipe_region_index(&dir)
+                    .map_err(TantivyError::from)
+                    .and_then(|()| Self::open_persistent(&dir));
+                match wiped {
+                    Ok((index, _)) => (index, Vec::new()),
+                    Err(err) => {
+                        tracing::warn!(
+                            dir = %dir.display(),
+                            %err,
+                            "persistent recall index unusable after a rebuild attempt; this region stays in memory"
+                        );
+                        (Self::in_ram(), Vec::new())
+                    }
+                }
+            }
+        }
+    }
 
+    /// An index in RAM. Infallible in practice — a `RamDirectory` cannot fail to
+    /// open — so the writer/reader construction keeps its `expect`.
+    fn in_ram() -> TantivyIndex {
+        let schema = schema();
         let index = Index::create_in_ram(schema);
-        let writer = index
-            .writer(WRITER_HEAP)
-            .expect("create tantivy in-RAM writer");
+        Self::wrap(index).expect("create the tantivy in-RAM index")
+    }
+
+    /// Memory-map an index under `dir`, creating it when absent, and recover the
+    /// stored manifest from whatever documents it already holds.
+    fn open_persistent(dir: &Path) -> Result<(TantivyIndex, Vec<RecoveredDoc>), TantivyError> {
+        std::fs::create_dir_all(dir)?;
+        let directory = MmapDirectory::open(dir)?;
+        let index = Index::open_or_create(directory, schema())?;
+        let opened = Self::wrap(index)?;
+        let recovered = opened.recover_manifest()?;
+        Ok((opened, recovered))
+    }
+
+    /// Attach a writer and a reader to an opened index.
+    fn wrap(index: Index) -> Result<TantivyIndex, TantivyError> {
+        let fields = Fields::resolve(&index.schema())?;
+        let writer = index.writer(WRITER_HEAP)?;
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
-            .try_into()
-            .expect("create tantivy reader");
-        TantivyIndex {
+            .try_into()?;
+        Ok(TantivyIndex {
             index,
             writer,
             reader,
-            path,
-            path_text,
-            body,
-            props_json,
+            fields,
+        })
+    }
+
+    /// Read `(clean_path, mtime, size)` off every live document, straight from the
+    /// columnar fast fields. No note body is decompressed and nothing is
+    /// re-tokenized, which is what makes a reopen cheap next to a rebuild — reading
+    /// the same three values out of the document store instead costs roughly the
+    /// same as re-reading the vault, because the store holds each body alongside
+    /// them. A document whose metadata is unreadable is skipped; the caller's
+    /// stat-diff then treats that file as changed and re-indexes it.
+    fn recover_manifest(&self) -> Result<Vec<RecoveredDoc>, TantivyError> {
+        let searcher = self.reader.searcher();
+        let mut out = Vec::with_capacity(searcher.num_docs() as usize);
+        let mut clean_path = String::new();
+        for segment in searcher.segment_readers() {
+            let fast = segment.fast_fields();
+            // A segment with no documents has no path column at all.
+            let Some(paths) = fast.str("path")? else {
+                continue;
+            };
+            let mtimes = fast.u64("mtime")?;
+            let sizes = fast.u64("size")?;
+            let alive = segment.alive_bitset();
+            for doc in 0..segment.max_doc() {
+                if alive.is_some_and(|bitset| !bitset.is_alive(doc)) {
+                    continue;
+                }
+                let (Some(ord), Some(mtime), Some(size)) = (
+                    paths.term_ords(doc).next(),
+                    mtimes.first(doc),
+                    sizes.first(doc),
+                ) else {
+                    continue;
+                };
+                clean_path.clear();
+                if !paths.ord_to_str(ord, &mut clean_path)? {
+                    continue;
+                }
+                out.push(RecoveredDoc {
+                    clean_path: clean_path.clone(),
+                    meta: SourceMeta {
+                        mtime: nanos_to_mtime(mtime),
+                        size,
+                    },
+                });
+            }
         }
+        Ok(out)
     }
 
     /// Read the three stored fields off a document.
     fn fields(&self, doc: &TantivyDocument) -> (String, String, serde_json::Value) {
-        let path = stored_str(doc, self.path).unwrap_or_default();
-        let body = stored_str(doc, self.body).unwrap_or_default();
-        let props = stored_str(doc, self.props_json)
+        let path = stored_str(doc, self.fields.path).unwrap_or_default();
+        let body = stored_str(doc, self.fields.body).unwrap_or_default();
+        let props = stored_str(doc, self.fields.props_json)
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
         (path, body, props)
@@ -126,24 +269,26 @@ impl TantivyIndex {
 }
 
 impl BackendIndex for TantivyIndex {
-    fn upsert(&mut self, clean_path: &str, body: &str) {
+    fn upsert(&mut self, clean_path: &str, body: &str, meta: SourceMeta) {
         // delete-then-add (the delete carries an earlier opstamp, so the new doc
         // survives the next commit) makes this an upsert keyed by `path`.
         self.writer
-            .delete_term(Term::from_field_text(self.path, clean_path));
+            .delete_term(Term::from_field_text(self.fields.path, clean_path));
         let parsed = frontmatter::parse(body);
         let props_json = serde_json::to_string(&parsed.props).unwrap_or_else(|_| "{}".to_string());
         let mut doc = TantivyDocument::default();
-        doc.add_text(self.path, clean_path);
-        doc.add_text(self.path_text, clean_path);
-        doc.add_text(self.body, &parsed.body);
-        doc.add_text(self.props_json, &props_json);
+        doc.add_text(self.fields.path, clean_path);
+        doc.add_text(self.fields.path_text, clean_path);
+        doc.add_text(self.fields.body, &parsed.body);
+        doc.add_text(self.fields.props_json, &props_json);
+        doc.add_u64(self.fields.mtime, mtime_to_nanos(meta.mtime));
+        doc.add_u64(self.fields.size, meta.size);
         let _ = self.writer.add_document(doc);
     }
 
     fn remove(&mut self, clean_path: &str) {
         self.writer
-            .delete_term(Term::from_field_text(self.path, clean_path));
+            .delete_term(Term::from_field_text(self.fields.path, clean_path));
     }
 
     fn flush(&mut self) {
@@ -159,7 +304,8 @@ impl BackendIndex for TantivyIndex {
 
         if let Some(text) = &compiled.raw_text {
             // BM25 over the narrowed candidate set, then regex/filter post-checks.
-            let parser = QueryParser::for_index(&self.index, vec![self.body, self.path_text]);
+            let parser =
+                QueryParser::for_index(&self.index, vec![self.fields.body, self.fields.path_text]);
             let query = match parser.parse_query(text).or_else(|_| {
                 // Lenient retry as a quoted phrase for inputs with query syntax.
                 parser.parse_query(&format!("\"{}\"", text.replace('"', " ")))
@@ -167,7 +313,7 @@ impl BackendIndex for TantivyIndex {
                 Ok(query) => query,
                 Err(_) => return ScanResult { hits, truncated },
             };
-            let generator = SnippetGenerator::create(&searcher, &*query, self.body).ok();
+            let generator = SnippetGenerator::create(&searcher, &*query, self.fields.body).ok();
             let limit = searcher.num_docs().max(1) as usize;
             let top = searcher
                 .search(&query, &TopDocs::with_limit(limit).order_by_score())
@@ -317,6 +463,24 @@ fn stored_str(doc: &TantivyDocument, field: Field) -> Option<String> {
         .and_then(|value| value.as_str().map(str::to_string))
 }
 
+/// Encode a modification time as nanoseconds since the Unix epoch. `SystemTime` on
+/// every supported platform is a whole number of nanoseconds, so the round-trip
+/// through [`nanos_to_mtime`] reproduces the exact value `fs::metadata` reported —
+/// which the reconcile's `==` comparison depends on. A pre-epoch timestamp (only
+/// reachable from a deliberately backdated file) collapses to the epoch, and so
+/// looks changed on every restart rather than wrongly unchanged.
+fn mtime_to_nanos(mtime: SystemTime) -> u64 {
+    mtime
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// The inverse of [`mtime_to_nanos`].
+fn nanos_to_mtime(nanos: u64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_nanos(nanos)
+}
+
 /// Truncate to at most `max` bytes on a char boundary, adding an ellipsis.
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
@@ -348,15 +512,32 @@ mod tests {
         }
     }
 
+    /// An in-RAM index (the default, unpersisted mode).
+    fn in_ram() -> TantivyIndex {
+        let (idx, recovered) = TantivyIndex::new(None);
+        assert!(recovered.is_empty(), "a RAM index has nothing to recover");
+        idx
+    }
+
+    /// Distinguishable stat metadata for a document.
+    fn meta(secs: u64, size: u64) -> SourceMeta {
+        SourceMeta {
+            mtime: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
+            size,
+        }
+    }
+
     fn index() -> TantivyIndex {
-        let mut idx = TantivyIndex::new();
+        let mut idx = in_ram();
         idx.upsert(
             "Agents/topics/rust.md",
             "---\ntags: [rust, systems]\nstatus: published\nweight: 5\n---\nThe borrow checker enforces ownership.",
+            meta(1_000, 11),
         );
         idx.upsert(
             "Agents/topics/python.md",
             "---\ntags: [python]\nstatus: draft\nweight: 2\n---\nThe GIL serializes threads.",
+            meta(2_000, 22),
         );
         idx.flush();
         idx
@@ -457,8 +638,12 @@ mod tests {
 
     #[test]
     fn regex_matches_path_when_body_does_not() {
-        let mut idx = TantivyIndex::new();
-        idx.upsert("Agents/diary/2026-06-10.md", "Nothing dated in the body.");
+        let mut idx = in_ram();
+        idx.upsert(
+            "Agents/diary/2026-06-10.md",
+            "Nothing dated in the body.",
+            meta(1_000, 26),
+        );
         idx.flush();
         let scan = idx.query(&compiled(None, Some(r"2026-06-10"), vec![]), usize::MAX);
         assert_eq!(scan.hits.len(), 1);
@@ -468,11 +653,12 @@ mod tests {
 
     #[test]
     fn full_text_matches_path_when_body_does_not() {
-        let mut idx = TantivyIndex::new();
+        let mut idx = in_ram();
         // "kotlin" appears only in the path, not the body.
         idx.upsert(
             "Agents/topics/kotlin.md",
             "Coroutines structure concurrency.",
+            meta(1_000, 33),
         );
         idx.flush();
         let scan = idx.query(&compiled(Some("kotlin"), None, vec![]), usize::MAX);
@@ -488,5 +674,57 @@ mod tests {
         idx.flush();
         let scan = idx.query(&compiled(Some("borrow"), None, vec![]), usize::MAX);
         assert!(scan.hits.is_empty());
+    }
+
+    /// The whole persistence scheme rests on this: the mtime a stat reports must
+    /// survive the trip through the stored field bit-for-bit, or the reconcile's
+    /// equality check calls every file changed and each restart re-indexes the
+    /// entire vault.
+    #[test]
+    fn a_real_files_mtime_round_trips_through_the_stored_field() {
+        let tmp = assert_fs::TempDir::new().unwrap();
+        let file = tmp.path().join("note.md");
+        std::fs::write(&file, b"body").unwrap();
+        let stat = std::fs::metadata(&file).unwrap().modified().unwrap();
+        assert_eq!(nanos_to_mtime(mtime_to_nanos(stat)), stat);
+        // Sub-second precision is not silently dropped.
+        assert_ne!(mtime_to_nanos(stat) % 1_000_000_000, u64::MAX);
+    }
+
+    /// A persisted index reopened in a fresh process hands back exactly the
+    /// manifest it was written with — the metadata is committed together with the
+    /// documents, so the two cannot desync.
+    #[test]
+    fn reopening_a_persisted_index_recovers_the_manifest_and_the_documents() {
+        let tmp = assert_fs::TempDir::new().unwrap();
+        let dir = tmp.path().join("region");
+        let file = tmp.path().join("note.md");
+        std::fs::write(&file, b"The borrow checker enforces ownership.").unwrap();
+        let stat = std::fs::metadata(&file).unwrap();
+        let written = SourceMeta {
+            mtime: stat.modified().unwrap(),
+            size: stat.len(),
+        };
+
+        {
+            let (mut idx, recovered) = TantivyIndex::new(Some(dir.clone()));
+            assert!(recovered.is_empty(), "a fresh directory holds no documents");
+            idx.upsert(
+                "Agents/topics/rust.md",
+                "The borrow checker enforces ownership.",
+                written,
+            );
+            idx.flush();
+        }
+
+        let (idx, recovered) = TantivyIndex::new(Some(dir));
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].clean_path, "Agents/topics/rust.md");
+        assert_eq!(recovered[0].meta.mtime, written.mtime);
+        assert_eq!(recovered[0].meta.size, written.size);
+        // The documents themselves came back too, queryable without re-indexing.
+        let scan = idx.query(&compiled(Some("borrow"), None, vec![]), usize::MAX);
+        assert_eq!(scan.hits.len(), 1);
+        assert_eq!(scan.hits[0].clean_path, "Agents/topics/rust.md");
     }
 }

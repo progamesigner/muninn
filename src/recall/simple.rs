@@ -7,7 +7,9 @@
 
 use std::collections::BTreeMap;
 
-use super::{BackendIndex, CompiledQuery, MAX_SNIPPET_LEN, MAX_SNIPPETS, RawHit, ScanResult};
+use super::{
+    BackendIndex, CompiledQuery, MAX_SNIPPET_LEN, MAX_SNIPPETS, RawHit, ScanResult, SourceMeta,
+};
 
 /// An in-memory map of clean virtual path → note body.
 #[derive(Default)]
@@ -16,7 +18,9 @@ pub(crate) struct SimpleIndex {
 }
 
 impl BackendIndex for SimpleIndex {
-    fn upsert(&mut self, clean_path: &str, body: &str) {
+    /// The stat metadata is ignored: this index lives only in RAM, so it has
+    /// nothing to recover a manifest from and no reason to store it.
+    fn upsert(&mut self, clean_path: &str, body: &str, _meta: SourceMeta) {
         self.docs.insert(clean_path.to_string(), body.to_string());
     }
 
@@ -152,13 +156,26 @@ mod tests {
         }
     }
 
+    /// Stat metadata this backend ignores.
+    fn meta() -> SourceMeta {
+        SourceMeta {
+            mtime: std::time::SystemTime::UNIX_EPOCH,
+            size: 0,
+        }
+    }
+
     fn index() -> SimpleIndex {
         let mut idx = SimpleIndex::default();
         idx.upsert(
             "Agents/topics/rust.md",
             "The borrow checker enforces ownership.\nLifetimes are elided.",
+            meta(),
         );
-        idx.upsert("Agents/topics/python.md", "The GIL serializes threads.");
+        idx.upsert(
+            "Agents/topics/python.md",
+            "The GIL serializes threads.",
+            meta(),
+        );
         idx
     }
 
@@ -209,7 +226,11 @@ mod tests {
     #[test]
     fn regex_matches_path_when_body_does_not() {
         let mut idx = SimpleIndex::default();
-        idx.upsert("Agents/diary/2026-06-10.md", "Nothing dated in the body.");
+        idx.upsert(
+            "Agents/diary/2026-06-10.md",
+            "Nothing dated in the body.",
+            meta(),
+        );
         let scan = idx.query(&compiled(None, Some(r"2026-06-10")), usize::MAX);
         assert_eq!(scan.hits.len(), 1);
         assert_eq!(scan.hits[0].clean_path, "Agents/diary/2026-06-10.md");
@@ -220,9 +241,9 @@ mod tests {
     fn path_and_body_matches_weighted_equally() {
         let mut idx = SimpleIndex::default();
         // "alpha" matches once in this note's body only.
-        idx.upsert("Agents/diary/one.md", "alpha lives in the body");
+        idx.upsert("Agents/diary/one.md", "alpha lives in the body", meta());
         // "alpha" matches once in this note's path only.
-        idx.upsert("Agents/diary/alpha.md", "beta lives in the body");
+        idx.upsert("Agents/diary/alpha.md", "beta lives in the body", meta());
         let scan = idx.query(&compiled(Some("alpha"), None), usize::MAX);
         assert_eq!(scan.hits.len(), 2);
         let body_hit = scan

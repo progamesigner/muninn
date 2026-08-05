@@ -1,12 +1,19 @@
-//! In-memory content recall.
+//! Content recall.
 //!
-//! Recall is backed by per-scope in-memory indexes plus a single shared-region
-//! index — nothing is written to disk. A scope's notes live only in that scope's
-//! index, so a query opens only the caller's own-scope index and (policy
-//! permitting) the shared index: cross-scope recall is *structurally* impossible,
-//! not filtered. Indexes are built eagerly at startup, updated synchronously on the
-//! server's own writes, and reconciled against external edits by a stat-diff that a
-//! filesystem watcher (and a freshness window) trigger.
+//! Recall is backed by per-scope indexes plus a single shared-region index. A
+//! scope's notes live only in that scope's index, so a query opens only the
+//! caller's own-scope index and (policy permitting) the shared index: cross-scope
+//! recall is *structurally* impossible, not filtered. Indexes are built eagerly at
+//! startup, updated synchronously on the server's own writes, and reconciled
+//! against external edits by a stat-diff that a filesystem watcher (and a freshness
+//! window) trigger.
+//!
+//! Indexes are held in memory and nothing is written to disk unless the operator
+//! sets `MUNINN_RECALL_INDEX_DIR` under the tantivy backend. With persistence on,
+//! each region's index is memory-mapped under that directory and its reconcile
+//! manifest is recovered from the index itself on open (see [`persist`] and the
+//! tantivy backend), so a restart re-reads only what changed while the server was
+//! down instead of the whole vault.
 //!
 //! The backend is configurable. The default [`SimpleIndex`] supports
 //! case-insensitive substring and regex matching; the opt-in tantivy backend (the
@@ -14,6 +21,8 @@
 //! Scores from the scope and shared indexes are normalized to 0–1 per index before
 //! merging, so the agent-facing score is comparable across the two corpora.
 
+#[cfg(feature = "recall-tantivy")]
+mod persist;
 mod simple;
 #[cfg(feature = "recall-tantivy")]
 mod tantivy;
@@ -21,7 +30,7 @@ mod tantivy;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime};
 
 use crate::config::{RecallBackendKind, RecallConfig};
@@ -128,9 +137,27 @@ pub(crate) struct CompiledQuery {
     pub filters: Vec<PropertyFilter>,
 }
 
-/// One in-memory backend index over a single region's notes.
+/// The source file's stat metadata, handed to the backend alongside the body. A
+/// disk-backed backend stores it so the manifest can be recovered when the index is
+/// reopened; in-memory backends ignore it.
+#[cfg_attr(not(feature = "recall-tantivy"), allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SourceMeta {
+    pub mtime: SystemTime,
+    pub size: u64,
+}
+
+/// One document read back out of a persisted index, used to seed a region's
+/// reconcile manifest before its first stat-diff.
+#[cfg_attr(not(feature = "recall-tantivy"), allow(dead_code))]
+pub(crate) struct RecoveredDoc {
+    pub clean_path: String,
+    pub meta: SourceMeta,
+}
+
+/// One backend index over a single region's notes.
 pub(crate) trait BackendIndex: Send {
-    fn upsert(&mut self, clean_path: &str, body: &str);
+    fn upsert(&mut self, clean_path: &str, body: &str, meta: SourceMeta);
     fn remove(&mut self, clean_path: &str);
     fn query(&self, query: &CompiledQuery, byte_cap: usize) -> ScanResult;
     /// Persist a batch of upserts/removals. A no-op for backends that mutate in
@@ -185,6 +212,13 @@ pub struct RecallEngine {
     dirty: std::sync::Arc<AtomicBool>,
     /// The live watcher; kept alive for the engine's lifetime.
     watcher: Mutex<Option<notify::RecommendedWatcher>>,
+    /// The persisted-index root, when the operator configured one and the
+    /// effective backend can use it.
+    #[cfg(feature = "recall-tantivy")]
+    persist: Option<persist::PersistRoot>,
+    /// How many note bodies have been read and handed to a backend since
+    /// construction. Backs [`RecallEngine::ingested_count`].
+    ingested: AtomicU64,
 }
 
 impl RecallEngine {
@@ -193,7 +227,15 @@ impl RecallEngine {
     /// a fallback to `simple` when tantivy was requested but is unavailable.
     pub fn new(storage: std::sync::Arc<Storage>, config: RecallConfig) -> Option<RecallEngine> {
         let effective = match config.backend {
-            RecallBackendKind::Off => return None,
+            RecallBackendKind::Off => {
+                if config.index_dir.is_some() {
+                    tracing::warn!(
+                        "MUNINN_RECALL_INDEX_DIR is set but recall is disabled \
+                         (MUNINN_RECALL_BACKEND=off); ignoring it"
+                    );
+                }
+                return None;
+            }
             RecallBackendKind::Simple => RecallBackendKind::Simple,
             RecallBackendKind::Tantivy => {
                 #[cfg(feature = "recall-tantivy")]
@@ -210,6 +252,23 @@ impl RecallEngine {
                 }
             }
         };
+        // Persistence is a tantivy-only capability: the simple backend has no
+        // on-disk representation, so the setting is ignored with a warning (the
+        // same place the feature-fallback warning above is issued).
+        if config.index_dir.is_some() && !matches!(effective, RecallBackendKind::Tantivy) {
+            tracing::warn!(
+                backend = effective.as_str(),
+                "MUNINN_RECALL_INDEX_DIR is set but the effective recall backend is not tantivy; \
+                 ignoring it and holding indexes in memory"
+            );
+        }
+        #[cfg(feature = "recall-tantivy")]
+        let persist = match (&config.index_dir, effective) {
+            (Some(dir), RecallBackendKind::Tantivy) => {
+                Some(persist::PersistRoot::new(dir, &storage))
+            }
+            _ => None,
+        };
         Some(RecallEngine {
             effective,
             storage,
@@ -222,6 +281,9 @@ impl RecallEngine {
             ready: AtomicBool::new(false),
             dirty: std::sync::Arc::new(AtomicBool::new(false)),
             watcher: Mutex::new(None),
+            #[cfg(feature = "recall-tantivy")]
+            persist,
+            ingested: AtomicU64::new(0),
         })
     }
 
@@ -245,6 +307,13 @@ impl RecallEngine {
     pub fn resident_scope_count(&self) -> usize {
         let state = self.state.lock().expect("recall state poisoned");
         state.scopes.len()
+    }
+
+    /// How many note bodies have been read and ingested since construction — the
+    /// count a persisted index exists to keep near zero across restarts. Backs the
+    /// persistence tests and benchmarks.
+    pub fn ingested_count(&self) -> u64 {
+        self.ingested.load(Ordering::Acquire)
     }
 
     /// Eagerly build every scope index and the shared index, then mark ready. Safe
@@ -379,7 +448,7 @@ impl RecallEngine {
         if include_scope {
             self.ensure_scope_resident(&mut state, rendered_scope);
             if let Some(idx) = state.scopes.get_mut(rendered_scope) {
-                Self::refresh(idx, force, self.config.freshness, &self.storage);
+                self.refresh(idx, force);
                 idx.last_access = Instant::now();
                 if has_content {
                     let scan = idx
@@ -394,7 +463,7 @@ impl RecallEngine {
             }
         }
         if include_shared && let Some(idx) = state.shared.as_mut() {
-            Self::refresh(idx, force, self.config.freshness, &self.storage);
+            self.refresh(idx, force);
             if has_content {
                 let scan = idx
                     .backend
@@ -497,11 +566,23 @@ impl RecallEngine {
 
     // --- index construction / reconciliation ---
 
+    /// Open (or create) a region's index. With persistence configured this reopens
+    /// the region's on-disk index and seeds the manifest from the metadata stored
+    /// in it, so the first reconcile is a stat-diff against real bookkeeping rather
+    /// than a full rebuild.
     fn new_region_index(&self, region: IndexRegion) -> RegionIndex {
+        // Only the tantivy arm can seed a manifest (persistence is tantivy-only).
+        #[cfg_attr(not(feature = "recall-tantivy"), allow(unused_mut))]
+        let mut manifest = BTreeMap::new();
         let backend: Box<dyn BackendIndex> = match self.effective {
             RecallBackendKind::Simple => Box::new(simple::SimpleIndex::default()),
             #[cfg(feature = "recall-tantivy")]
-            RecallBackendKind::Tantivy => Box::new(tantivy::TantivyIndex::new()),
+            RecallBackendKind::Tantivy => {
+                let dir = self.persist.as_ref().and_then(|p| p.region_dir(&region));
+                let (index, recovered) = tantivy::TantivyIndex::new(dir);
+                manifest = self.seed_manifest(&region, recovered);
+                Box::new(index)
+            }
             // Without the feature, `new` never resolves the effective backend to
             // Tantivy, so this arm is unreachable.
             #[cfg(not(feature = "recall-tantivy"))]
@@ -510,36 +591,67 @@ impl RecallEngine {
         };
         RegionIndex {
             region,
-            manifest: BTreeMap::new(),
+            manifest,
             backend,
             last_reconcile: None,
             last_access: Instant::now(),
         }
     }
 
+    /// Turn documents recovered from a persisted index into a reconcile manifest.
+    /// The manifest is keyed by physical path, so each recovered clean path is run
+    /// back through the resolver — the same mapping `current_files` applies — and an
+    /// entry that no longer resolves is dropped (the file is then simply absent from
+    /// the diff's "unchanged" set and gets re-indexed or removed).
+    #[cfg(feature = "recall-tantivy")]
+    fn seed_manifest(
+        &self,
+        region: &IndexRegion,
+        recovered: Vec<RecoveredDoc>,
+    ) -> BTreeMap<PathBuf, FileMeta> {
+        let resolver = self.storage.resolver();
+        let scope = match region {
+            IndexRegion::Shared => "",
+            IndexRegion::Scoped(scope) => scope.as_str(),
+        };
+        let mut manifest = BTreeMap::new();
+        for doc in recovered {
+            let Ok(vpath) = crate::path::VirtualPath::new(&doc.clean_path) else {
+                continue;
+            };
+            let Ok(physical) = resolver.resolve(scope, &vpath) else {
+                continue;
+            };
+            manifest.insert(
+                physical.as_path().to_path_buf(),
+                FileMeta {
+                    clean_path: doc.clean_path,
+                    mtime: doc.meta.mtime,
+                    size: doc.meta.size,
+                },
+            );
+        }
+        manifest
+    }
+
     /// Reconcile if the index is stale or the engine was marked dirty.
-    fn refresh(
-        idx: &mut RegionIndex,
-        force: bool,
-        freshness: std::time::Duration,
-        storage: &Storage,
-    ) {
+    fn refresh(&self, idx: &mut RegionIndex, force: bool) {
         let stale = match idx.last_reconcile {
             None => true,
-            Some(t) => t.elapsed() >= freshness,
+            Some(t) => t.elapsed() >= self.config.freshness,
         };
         if force || stale {
-            reconcile_with(idx, storage);
+            reconcile_with(idx, &self.storage, &self.ingested);
         }
     }
 
     fn reconcile(&self, idx: &mut RegionIndex) {
-        reconcile_with(idx, &self.storage);
+        reconcile_with(idx, &self.storage, &self.ingested);
     }
 
     /// Re-read and upsert a single physical path into `idx` (or remove it if gone).
     fn apply_path(&self, idx: &mut RegionIndex, physical: &PhysicalPath) {
-        apply_path_with(idx, physical, &self.storage);
+        apply_path_with(idx, physical, &self.storage, &self.ingested);
     }
 
     /// Build a scope index on demand when it was never built or was evicted.
@@ -564,7 +676,11 @@ impl RecallEngine {
                 .map(|(k, _)| k.clone());
             match victim {
                 Some(k) => {
-                    state.scopes.remove(&k);
+                    // Commit before dropping: a disk-backed index must not lose
+                    // uncommitted work, since the next access reopens from disk.
+                    if let Some(mut idx) = state.scopes.remove(&k) {
+                        idx.backend.flush();
+                    }
                 }
                 None => break,
             }
@@ -614,8 +730,10 @@ fn current_files(idx: &RegionIndex, storage: &Storage) -> Vec<(PhysicalPath, Str
     out
 }
 
-/// Stat-diff reconcile: upsert new/changed files, drop deleted ones.
-fn reconcile_with(idx: &mut RegionIndex, storage: &Storage) {
+/// Stat-diff reconcile: upsert new/changed files, drop deleted ones. `ingested`
+/// counts the bodies actually read, so a restart over a persisted index can be
+/// asserted to read nothing.
+fn reconcile_with(idx: &mut RegionIndex, storage: &Storage, ingested: &AtomicU64) {
     let current = current_files(idx, storage);
     let mut seen: BTreeMap<PathBuf, ()> = BTreeMap::new();
 
@@ -635,7 +753,8 @@ fn reconcile_with(idx: &mut RegionIndex, storage: &Storage) {
             continue;
         }
         if let Ok(body) = read_for_index(idx, physical, storage) {
-            idx.backend.upsert(clean, &body);
+            ingested.fetch_add(1, Ordering::AcqRel);
+            idx.backend.upsert(clean, &body, SourceMeta { mtime, size });
             idx.manifest.insert(
                 key,
                 FileMeta {
@@ -665,7 +784,12 @@ fn reconcile_with(idx: &mut RegionIndex, storage: &Storage) {
 }
 
 /// Upsert or remove a single physical path (used by the synchronous own-write path).
-fn apply_path_with(idx: &mut RegionIndex, physical: &PhysicalPath, storage: &Storage) {
+fn apply_path_with(
+    idx: &mut RegionIndex,
+    physical: &PhysicalPath,
+    storage: &Storage,
+    ingested: &AtomicU64,
+) {
     let key = physical.as_path().to_path_buf();
     match std::fs::metadata(physical.as_path()) {
         Ok(m) => {
@@ -678,7 +802,9 @@ fn apply_path_with(idx: &mut RegionIndex, physical: &PhysicalPath, storage: &Sto
                 .map(|meta| meta.clean_path.clone())
                 .or_else(|| clean_path_for(idx, physical, storage));
             if let (Some(clean), Ok(body)) = (clean, read_for_index(idx, physical, storage)) {
-                idx.backend.upsert(&clean, &body);
+                ingested.fetch_add(1, Ordering::AcqRel);
+                idx.backend
+                    .upsert(&clean, &body, SourceMeta { mtime, size });
                 idx.manifest.insert(
                     key,
                     FileMeta {
@@ -797,6 +923,7 @@ mod tests {
             regex_scan_byte_cap: usize::MAX,
             max_resident_scopes: 256,
             freshness: std::time::Duration::from_millis(0),
+            index_dir: None,
         };
         let engine = RecallEngine::new(storage, config).unwrap();
         (tmp, engine)
@@ -956,6 +1083,7 @@ mod tests {
             regex_scan_byte_cap: usize::MAX,
             max_resident_scopes: 256,
             freshness: std::time::Duration::from_millis(0),
+            index_dir: None,
         };
         let engine = RecallEngine::new(storage, config).unwrap();
         assert!(engine.supports_property_filters());
@@ -1110,6 +1238,7 @@ mod tests {
             regex_scan_byte_cap: usize::MAX,
             max_resident_scopes: 256,
             freshness: std::time::Duration::from_millis(0),
+            index_dir: None,
         };
         let engine = RecallEngine::new(storage, config).unwrap();
 
@@ -1248,6 +1377,7 @@ mod tests {
             regex_scan_byte_cap: usize::MAX,
             max_resident_scopes: 1,
             freshness: std::time::Duration::from_secs(3600),
+            index_dir: None,
         };
         let engine = RecallEngine::new(storage, config).unwrap();
 
@@ -1316,6 +1446,7 @@ mod tests {
             regex_scan_byte_cap: usize::MAX,
             max_resident_scopes: 256,
             freshness: std::time::Duration::from_millis(0),
+            index_dir: None,
         };
         let engine = RecallEngine::new(storage, config).unwrap();
 
@@ -1339,6 +1470,381 @@ mod tests {
         );
     }
 
+    // --- persistent index (MUNINN_RECALL_INDEX_DIR) ---
+
+    /// A tantivy engine over `vault`, optionally persisting under `index_dir`. The
+    /// freshness window is an hour and no watcher runs, so the only reconciles are
+    /// the ones a test triggers — which makes `ingested_count` an exact count of
+    /// the note bodies the engine chose to read.
+    #[cfg(feature = "recall-tantivy")]
+    fn persisted_engine(
+        vault: &std::path::Path,
+        index_dir: Option<&std::path::Path>,
+        max_resident_scopes: usize,
+        scheme: &str,
+    ) -> RecallEngine {
+        let resolver = PathResolver::new(
+            vault.canonicalize().unwrap(),
+            camino::Utf8PathBuf::from("Agents"),
+            Scheme::parse(scheme).unwrap(),
+        );
+        let storage = Arc::new(Storage::new(resolver, true, false, &[]));
+        let config = RecallConfig {
+            backend: RecallBackendKind::Tantivy,
+            watch_debounce: std::time::Duration::from_secs(3600),
+            regex_scan_byte_cap: usize::MAX,
+            max_resident_scopes,
+            freshness: std::time::Duration::from_secs(3600),
+            index_dir: index_dir.map(|p| p.to_path_buf()),
+        };
+        RecallEngine::new(storage, config).unwrap()
+    }
+
+    /// A two-scope vault with a shared note: five notes in total.
+    #[cfg(feature = "recall-tantivy")]
+    fn persistence_vault() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        tmp.child("Agents/jarvis.tony/topics/rust.jarvis.tony.md")
+            .write_str("The borrow checker enforces ownership.")
+            .unwrap();
+        tmp.child("Agents/jarvis.tony/topics/async.jarvis.tony.md")
+            .write_str("Futures are polled by the executor.")
+            .unwrap();
+        tmp.child("Agents/jarvis.sam/topics/notes.jarvis.sam.md")
+            .write_str("Sam keeps ownership notes.")
+            .unwrap();
+        tmp.child("Actions/release.md")
+            .write_str("The release process is documented.")
+            .unwrap();
+        tmp.child("Actions/roadmap.md")
+            .write_str("The roadmap lists the next milestones.")
+            .unwrap();
+        tmp
+    }
+
+    /// The fingerprint directories currently present under an index dir.
+    #[cfg(feature = "recall-tantivy")]
+    fn fingerprint_dirs(index_dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(index_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Restarting over an unchanged vault must read no note content at all: the
+    /// manifest recovered from the persisted index makes every file compare equal
+    /// under the stat-diff.
+    #[cfg(feature = "recall-tantivy")]
+    #[test]
+    fn restart_over_an_unchanged_vault_reindexes_nothing() {
+        let vault = persistence_vault();
+        let index = TempDir::new().unwrap();
+
+        let cold = persisted_engine(vault.path(), Some(index.path()), 256, "<agent>.<user>");
+        cold.warm();
+        assert_eq!(cold.ingested_count(), 5, "the cold build reads every note");
+        let before = cold
+            .recall("jarvis.tony", BOTH, &query("ownership"))
+            .unwrap();
+        drop(cold);
+
+        let warm = persisted_engine(vault.path(), Some(index.path()), 256, "<agent>.<user>");
+        warm.warm();
+        assert_eq!(
+            warm.ingested_count(),
+            0,
+            "a restart over an unchanged vault must not re-read any note"
+        );
+        let after = warm
+            .recall("jarvis.tony", BOTH, &query("ownership"))
+            .unwrap();
+
+        let paths =
+            |r: &RecallResults| -> Vec<String> { r.hits.iter().map(|h| h.path.clone()).collect() };
+        assert_eq!(paths(&before), paths(&after));
+        assert!(paths(&after).contains(&"Agents/topics/rust.md".to_string()));
+        // Cross-scope isolation survives persistence: sam's note lives in another
+        // region directory and is unreachable, though it matches the query.
+        for path in paths(&after) {
+            assert!(!path.contains("notes"), "leaked path: {path}");
+        }
+    }
+
+    /// Everything that changed while the server was down is reconciled on the next
+    /// start, and only that.
+    #[cfg(feature = "recall-tantivy")]
+    #[test]
+    fn changes_made_while_down_are_reconciled_and_nothing_else_is_reread() {
+        let vault = persistence_vault();
+        let index = TempDir::new().unwrap();
+
+        let cold = persisted_engine(vault.path(), Some(index.path()), 256, "<agent>.<user>");
+        cold.warm();
+        drop(cold);
+
+        // While "down": one note added, one edited, one deleted.
+        vault
+            .child("Agents/jarvis.tony/topics/traits.jarvis.tony.md")
+            .write_str("Traits describe shared behaviour.")
+            .unwrap();
+        let edited = vault
+            .path()
+            .join("Agents/jarvis.tony/topics/rust.jarvis.tony.md");
+        std::fs::write(&edited, "The borrow checker now also mentions lifetimes.").unwrap();
+        // An explicit mtime so the change is visible even on a coarse clock.
+        set_mtime(&edited, 9_000);
+        std::fs::remove_file(
+            vault
+                .path()
+                .join("Agents/jarvis.tony/topics/async.jarvis.tony.md"),
+        )
+        .unwrap();
+
+        let warm = persisted_engine(vault.path(), Some(index.path()), 256, "<agent>.<user>");
+        warm.warm();
+        assert_eq!(
+            warm.ingested_count(),
+            2,
+            "only the added and the edited note should be read"
+        );
+
+        let hits = warm
+            .recall("jarvis.tony", BOTH, &query("lifetimes"))
+            .unwrap();
+        let paths: Vec<&str> = hits.hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["Agents/topics/rust.md"], "the edit is visible");
+
+        let hits = warm.recall("jarvis.tony", BOTH, &query("traits")).unwrap();
+        assert!(
+            hits.hits
+                .iter()
+                .any(|h| h.path == "Agents/topics/traits.md"),
+            "the addition is visible: {:?}",
+            hits.hits
+        );
+
+        let hits = warm.recall("jarvis.tony", BOTH, &query("futures")).unwrap();
+        assert!(
+            hits.hits.is_empty(),
+            "the deleted note must be gone: {:?}",
+            hits.hits
+        );
+    }
+
+    /// A configuration change that alters what gets ingested lands on a different
+    /// fingerprint, so the previous index is neither reused nor left on disk.
+    #[cfg(feature = "recall-tantivy")]
+    #[test]
+    fn a_changed_scheme_invalidates_and_removes_the_persisted_index() {
+        let vault = persistence_vault();
+        let index = TempDir::new().unwrap();
+
+        let first = persisted_engine(vault.path(), Some(index.path()), 256, "<agent>.<user>");
+        first.warm();
+        drop(first);
+        let before = fingerprint_dirs(index.path());
+        assert_eq!(before.len(), 1, "one fingerprint directory: {before:?}");
+
+        // A different scheme shapes the ingested view, so the fingerprint changes.
+        let second = persisted_engine(vault.path(), Some(index.path()), 256, "<agent>");
+        second.warm();
+        let after = fingerprint_dirs(index.path());
+        assert_eq!(
+            after.len(),
+            1,
+            "the stale fingerprint must be gone: {after:?}"
+        );
+        assert_ne!(before, after);
+        assert!(
+            second.ingested_count() > 0,
+            "the new fingerprint must be built from the vault"
+        );
+        // And the shared region — unaffected by the scheme — still answers.
+        let hits = second
+            .recall("jarvis.tony", BOTH, &query("release"))
+            .unwrap();
+        assert!(
+            hits.hits.iter().any(|h| h.path == "Actions/release.md"),
+            "results must be correct under the new fingerprint: {:?}",
+            hits.hits
+        );
+    }
+
+    /// A damaged index is discarded rather than trusted or fatal.
+    #[cfg(feature = "recall-tantivy")]
+    #[test]
+    fn a_corrupted_persisted_index_is_wiped_and_rebuilt() {
+        let vault = persistence_vault();
+        let index = TempDir::new().unwrap();
+
+        let cold = persisted_engine(vault.path(), Some(index.path()), 256, "<agent>.<user>");
+        cold.warm();
+        drop(cold);
+
+        // Truncate every segment file in every region, leaving tantivy's metadata
+        // intact so the damage is only discovered while reading documents.
+        let mut truncated = 0usize;
+        for entry in walk_files(index.path()) {
+            let name = entry.file_name().unwrap().to_string_lossy().into_owned();
+            if name == "meta.json" || name == ".managed.json" || name == "region.id" {
+                continue;
+            }
+            std::fs::write(&entry, b"").unwrap();
+            truncated += 1;
+        }
+        assert!(truncated > 0, "the build must have written segment files");
+
+        let warm = persisted_engine(vault.path(), Some(index.path()), 256, "<agent>.<user>");
+        warm.warm();
+        assert_eq!(
+            warm.ingested_count(),
+            5,
+            "a corrupted index must be rebuilt from the vault in full"
+        );
+        let hits = warm
+            .recall("jarvis.tony", BOTH, &query("ownership"))
+            .unwrap();
+        assert!(
+            hits.hits.iter().any(|h| h.path == "Agents/topics/rust.md"),
+            "recall must be correct after the rebuild: {:?}",
+            hits.hits
+        );
+        // Every rebuilt region directory is still claimed by its own region, so a
+        // later start cannot mistake one region's index for another's.
+        let markers: Vec<PathBuf> = walk_files(index.path())
+            .into_iter()
+            .filter(|p| p.file_name().is_some_and(|n| n == "region.id"))
+            .collect();
+        assert_eq!(
+            markers.len(),
+            3,
+            "expected an identity marker per region (two scopes and shared): {markers:?}"
+        );
+    }
+
+    /// With persistence on, re-residence after eviction is a reopen plus a
+    /// stat-diff, not a rebuild.
+    #[cfg(feature = "recall-tantivy")]
+    #[test]
+    fn re_resident_scopes_reopen_instead_of_reindexing() {
+        let vault = persistence_vault();
+        let index = TempDir::new().unwrap();
+        // One resident scope, so each cross-scope recall evicts the other.
+        let engine = persisted_engine(vault.path(), Some(index.path()), 1, "<agent>.<user>");
+        engine.warm();
+        let after_build = engine.ingested_count();
+        assert_eq!(after_build, 5);
+
+        for _ in 0..3 {
+            let tony = engine
+                .recall("jarvis.tony", BOTH, &query("ownership"))
+                .unwrap();
+            assert!(
+                tony.hits.iter().any(|h| h.path == "Agents/topics/rust.md"),
+                "tony's own note must survive the round trip: {:?}",
+                tony.hits
+            );
+            let sam = engine
+                .recall("jarvis.sam", BOTH, &query("ownership"))
+                .unwrap();
+            assert!(
+                sam.hits.iter().any(|h| h.path == "Agents/topics/notes.md"),
+                "sam's own note must survive the round trip: {:?}",
+                sam.hits
+            );
+            assert!(engine.resident_scope_count() <= 1);
+        }
+        assert_eq!(
+            engine.ingested_count(),
+            after_build,
+            "re-residence must reopen the persisted index, not re-index the scope"
+        );
+    }
+
+    /// Persistence is opt-in: with no index directory the tantivy backend writes
+    /// nothing outside the vault, exactly as before this option existed.
+    #[cfg(feature = "recall-tantivy")]
+    #[test]
+    fn without_an_index_dir_nothing_is_written_to_disk() {
+        let vault = persistence_vault();
+        let scratch = TempDir::new().unwrap();
+        let engine = persisted_engine(vault.path(), None, 256, "<agent>.<user>");
+        engine.warm();
+        assert!(
+            !engine
+                .recall("jarvis.tony", BOTH, &query("ownership"))
+                .unwrap()
+                .hits
+                .is_empty()
+        );
+        assert!(
+            walk_files(scratch.path()).is_empty(),
+            "an unconfigured engine must not write index files anywhere"
+        );
+    }
+
+    /// The `simple` backend has no on-disk form, so a configured index directory is
+    /// ignored — the engine starts, serves, and leaves the directory empty.
+    #[test]
+    fn the_simple_backend_ignores_a_configured_index_dir() {
+        let tmp = TempDir::new().unwrap();
+        tmp.child("Agents/jarvis.tony/topics/rust.jarvis.tony.md")
+            .write_str("The borrow checker enforces ownership.")
+            .unwrap();
+        let index = TempDir::new().unwrap();
+        let resolver = PathResolver::new(
+            tmp.path().canonicalize().unwrap(),
+            camino::Utf8PathBuf::from("Agents"),
+            Scheme::parse("<agent>.<user>").unwrap(),
+        );
+        let storage = Arc::new(Storage::new(resolver, true, false, &[]));
+        let config = RecallConfig {
+            backend: RecallBackendKind::Simple,
+            watch_debounce: std::time::Duration::from_millis(0),
+            regex_scan_byte_cap: usize::MAX,
+            max_resident_scopes: 256,
+            freshness: std::time::Duration::from_millis(0),
+            index_dir: Some(index.path().to_path_buf()),
+        };
+        let engine = RecallEngine::new(storage, config).unwrap();
+        engine.warm();
+        assert!(
+            !engine
+                .recall("jarvis.tony", BOTH, &query("ownership"))
+                .unwrap()
+                .hits
+                .is_empty()
+        );
+        assert!(
+            walk_files(index.path()).is_empty(),
+            "the simple backend must leave the index directory untouched"
+        );
+    }
+
+    /// Every regular file under `root`, recursively.
+    fn walk_files(root: &std::path::Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
     #[cfg(feature = "recall-tantivy")]
     #[test]
     fn tantivy_matches_path_end_to_end() {
@@ -1359,6 +1865,7 @@ mod tests {
             regex_scan_byte_cap: usize::MAX,
             max_resident_scopes: 256,
             freshness: std::time::Duration::from_millis(0),
+            index_dir: None,
         };
         let engine = RecallEngine::new(storage, config).unwrap();
         let results = engine

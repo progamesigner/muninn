@@ -171,6 +171,24 @@ impl Scheme {
     }
 }
 
+/// The canonical scheme string — the exact form [`Scheme::parse`] accepts, so it
+/// round-trips. Used wherever the scheme must be identified stably (the recall
+/// index fingerprint) rather than merely debugged.
+impl std::fmt::Display for Scheme {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (i, seg) in self.segments.iter().enumerate() {
+            if i > 0 {
+                f.write_str(".")?;
+            }
+            match seg {
+                Segment::Literal(literal) => f.write_str(literal)?,
+                Segment::Placeholder(ident) => write!(f, "<{ident}>")?,
+            }
+        }
+        Ok(())
+    }
+}
+
 fn validate_ident(ident: &str) -> std::result::Result<(), SchemeError> {
     let mut chars = ident.chars();
     let ok = match chars.next() {

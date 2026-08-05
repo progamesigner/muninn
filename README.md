@@ -116,7 +116,9 @@ livenessProbe:
 readinessProbe:
   httpGet: { path: /readyz, port: 8000 }
 # A long cold build over a large vault fits a startupProbe with a high
-# failureThreshold, after which liveness/readiness take over.
+# failureThreshold, after which liveness/readiness take over. To make restarts
+# cheap instead of merely survivable, persist the index — see
+# "Persistent recall index".
 startupProbe:
   httpGet: { path: /readyz, port: 8000 }
   failureThreshold: 60
@@ -174,6 +176,7 @@ and overrides — the matching variable (`--root-dir`, `--policy`, `--http-bind`
 | `MUNINN_RECALL_REGEX_SCAN_BYTES` | `67108864` | Byte cap on a regex-only recall scan before it truncates (the result is flagged). |
 | `MUNINN_RECALL_MAX_RESIDENT_SCOPES` | `256` | Cap on resident per-scope indexes before idle ones are evicted (they rebuild on next use). |
 | `MUNINN_RECALL_FRESHNESS_MS` | `2000` | How long an index stays fresh before a query re-runs the stat-diff reconcile (the watcher can mark it dirty sooner). |
+| `MUNINN_RECALL_INDEX_DIR` | *(unset)* | Directory for persistent on-disk recall indexes, so a restart re-reads only what changed while the server was down instead of rebuilding from the whole vault (see [Persistent recall index](#persistent-recall-index)). Unset — the default — keeps every index in memory and writes no index data to disk. Must be an absolute path **outside** the vault root (a path inside it fails startup: the vault watcher would see every index write). `tantivy` backend only; under `simple` it is ignored with a startup `WARN`. One writer per directory. |
 
 ### VFS scheme
 
@@ -234,16 +237,17 @@ scheme; introspect them via the standard MCP `tools/list` call.
 ### Recall
 
 `recall_memory_notes` finds notes by content so an agent need not list-and-read to
-locate them. It is backed by an **in-memory** index, the way Obsidian works —
-nothing is written to disk; the index is built eagerly at startup, updated
+locate them. It is backed by an **in-memory** index by default, the way Obsidian
+works — nothing is written to disk; the index is built eagerly at startup, updated
 synchronously on the server's own writes, and reconciled against external edits by
 a filesystem watcher with a stat-diff backstop. The index is disposable: delete
-the process and it rebuilds from the vault.
+the process and it rebuilds from the vault. On a large vault that rebuild can be
+expensive enough to matter at restart, which is what
+[`MUNINN_RECALL_INDEX_DIR`](#persistent-recall-index) addresses.
 
-Isolation is **structural**: each scope has its own in-memory index plus one
-shared-region index, so a query opens only the caller's index and (policy
-permitting) the shared one — another scope's content is unreachable, not merely
-filtered.
+Isolation is **structural**: each scope has its own index plus one shared-region
+index, so a query opens only the caller's index and (policy permitting) the shared
+one — another scope's content is unreachable, not merely filtered.
 
 Two backends, selected by `MUNINN_RECALL_BACKEND`:
 
@@ -279,6 +283,65 @@ are changed only through `evolve_core_persona` / `update_task_heartbeat`.
 `write_memory_note` / `edit_memory_note` / `delete_memory_note` may only target
 paths under a subfolder; a root-level target is rejected with `path_not_permitted`.
 Reads of root files remain allowed.
+
+#### Persistent recall index
+
+Set `MUNINN_RECALL_INDEX_DIR` (tantivy backend only) to keep the indexes on disk
+across restarts. Each region's index is memory-mapped under that directory, and
+every document additionally stores its source file's mtime and size — so opening a
+persisted index also recovers the reconcile manifest, and startup becomes "open the
+index, stat-walk the vault, re-index only what changed while the server was down"
+instead of reading and tokenizing everything. Recall results are identical either
+way; only the time to `GET /readyz` differs.
+
+Unset is the default and behaves exactly as before: memory only, nothing written to
+disk. Rolling back is just unsetting the variable — nothing on disk is needed to
+start in memory-only mode, and a leftover index directory is inert.
+
+The layout is `<index_dir>/<fingerprint>/<region>/`, where the fingerprint covers
+the index format version plus the configuration that shapes what gets ingested
+(`MUNINN_VFS_SCHEME`, `MUNINN_AGENTS_DIR`, and the visibility settings). Change any
+of those, or upgrade to a server with a newer index format, and the old fingerprint
+directory is deleted and the index rebuilt — a persisted index is never read under
+a configuration it was not built for. The same fallback covers damage: an index
+that cannot be opened, or whose schema does not match, is wiped and rebuilt with a
+`WARN`. The process does not exit, and it never serves results from a foreign or
+half-read index.
+
+Operational constraints:
+
+- **One writer per directory.** tantivy takes a writer lock per index, so two
+  server processes must not share one index directory. Give each replica its own.
+- **Absolute, and outside the vault root.** The vault watcher watches the root
+  recursively; index writes inside it would mark the engine dirty on every commit.
+  A path inside the vault fails startup with a message naming both variables.
+- **Disk sizing.** Budget roughly the size of the vault's indexable text, plus
+  headroom for segment merges — 2–3× the text size is a safe starting point for a
+  volume. Stale fingerprint directories are pruned at startup, so disk use does not
+  accumulate across upgrades or configuration changes.
+
+In Kubernetes an `emptyDir` is usually the right volume: it survives the container
+restarts a liveness kill causes (the case where a slow cold build hurts most) and
+is discarded when the pod is rescheduled, which pays one full rebuild — correct by
+construction, since a fresh pod may land on a different node.
+
+```yaml
+volumes:
+  - name: recall-index
+    emptyDir:
+      sizeLimit: 2Gi
+containers:
+  - name: muninn
+    env:
+      - { name: MUNINN_RECALL_BACKEND, value: tantivy }
+      - { name: MUNINN_RECALL_INDEX_DIR, value: /var/lib/muninn/index }
+    volumeMounts:
+      - { name: recall-index, mountPath: /var/lib/muninn/index }
+```
+
+Watch the `recall index ready` log line's `elapsed` field to see the payoff: the
+second start over an unchanged vault should reach ready in a fraction of the cold
+build's time.
 
 ### Cross-note links
 

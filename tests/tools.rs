@@ -43,6 +43,7 @@ fn recall_toolbox_tz(tmp: &TempDir, timezone: Tz) -> Toolbox {
         regex_scan_byte_cap: usize::MAX,
         max_resident_scopes: 256,
         freshness: Duration::ZERO,
+        index_dir: None,
     };
     let recall =
         RecallEngine::new(Arc::new(Storage::new(mk(), true, false, &[])), config).map(Arc::new);
@@ -80,6 +81,7 @@ fn frozen_toolbox(tmp: &TempDir, backend: RecallBackendKind) -> Toolbox {
         regex_scan_byte_cap: usize::MAX,
         max_resident_scopes: 256,
         freshness: Duration::from_secs(3600),
+        index_dir: None,
     };
     let recall =
         RecallEngine::new(Arc::new(Storage::new(mk(), true, false, &[])), config).map(Arc::new);

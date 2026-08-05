@@ -131,6 +131,10 @@ pub struct Storage {
     /// Glob matcher whose matches (path or any parent) exempt a dot-path from
     /// hidden filtering. Matches nothing when no patterns are configured.
     include_hidden_globs: Gitignore,
+    /// The glob patterns as configured. Retained because the recall index
+    /// fingerprint hashes the visibility settings that shape what gets ingested,
+    /// and a compiled `Gitignore` cannot be read back.
+    include_hidden_glob_patterns: Vec<String>,
     locks: DashMap<PathBuf, Arc<Mutex<()>>>,
 }
 
@@ -144,6 +148,7 @@ impl Storage {
         // Patterns are validated at config-load time; if compilation somehow
         // fails here, fall back to an empty matcher (no exemptions) rather than
         // panicking inside the storage layer.
+        let include_hidden_glob_patterns = include_hidden_globs.to_vec();
         let include_hidden_globs =
             compile_include_globs(resolver.vault_root(), include_hidden_globs)
                 .unwrap_or_else(|_| Gitignore::empty());
@@ -152,12 +157,28 @@ impl Storage {
             honor_ignore_files,
             include_hidden,
             include_hidden_globs,
+            include_hidden_glob_patterns,
             locks: DashMap::new(),
         }
     }
 
     pub fn resolver(&self) -> &PathResolver {
         &self.resolver
+    }
+
+    /// Whether ignore files are honoured when listing.
+    pub fn honor_ignore_files(&self) -> bool {
+        self.honor_ignore_files
+    }
+
+    /// Whether hidden (dot) paths are visible.
+    pub fn include_hidden(&self) -> bool {
+        self.include_hidden
+    }
+
+    /// The configured hidden-exemption glob patterns, as written.
+    pub fn include_hidden_glob_patterns(&self) -> &[String] {
+        &self.include_hidden_glob_patterns
     }
 
     /// Read a file's UTF-8 contents.

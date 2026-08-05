@@ -57,6 +57,7 @@ fn resident_scopes_never_exceed_the_cap() {
         regex_scan_byte_cap: usize::MAX,
         max_resident_scopes: MAX_RESIDENT,
         freshness: Duration::from_secs(3600),
+        index_dir: None,
     };
     let engine = RecallEngine::new(storage, config).unwrap();
     engine.warm();

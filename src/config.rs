@@ -65,6 +65,7 @@ const VAR_RECALL_WATCH_DEBOUNCE_MS: &str = "MUNINN_RECALL_WATCH_DEBOUNCE_MS";
 const VAR_RECALL_REGEX_SCAN_BYTES: &str = "MUNINN_RECALL_REGEX_SCAN_BYTES";
 const VAR_RECALL_MAX_RESIDENT_SCOPES: &str = "MUNINN_RECALL_MAX_RESIDENT_SCOPES";
 const VAR_RECALL_FRESHNESS_MS: &str = "MUNINN_RECALL_FRESHNESS_MS";
+const VAR_RECALL_INDEX_DIR: &str = "MUNINN_RECALL_INDEX_DIR";
 
 /// The selected transport and its parameters.
 #[derive(Clone, PartialEq, Eq)]
@@ -354,6 +355,11 @@ pub struct RecallConfig {
     /// How long an index stays fresh before a query re-runs the stat-diff
     /// reconcile (the watcher can mark it dirty sooner).
     pub freshness: Duration,
+    /// Directory holding persistent on-disk indexes. `None` — the default —
+    /// keeps every index in memory and writes nothing to disk. Validated at load
+    /// time to be absolute and outside the vault root; honoured only by the
+    /// `tantivy` backend (the engine warns and ignores it otherwise).
+    pub index_dir: Option<PathBuf>,
 }
 
 /// The fully-resolved server configuration.
@@ -451,6 +457,10 @@ pub struct Cli {
     /// Recall backend: simple|tantivy|off (overrides MUNINN_RECALL_BACKEND).
     #[arg(long)]
     pub recall_backend: Option<String>,
+    /// Directory for persistent on-disk recall indexes; must be absolute and
+    /// outside the vault root (overrides MUNINN_RECALL_INDEX_DIR).
+    #[arg(long)]
+    pub recall_index_dir: Option<PathBuf>,
     /// Print the effective configuration to stderr and exit.
     #[arg(long)]
     pub print_config: bool,
@@ -522,6 +532,9 @@ impl Cli {
         }
         if let Some(v) = &self.recall_backend {
             m.insert(VAR_RECALL_BACKEND, v.clone());
+        }
+        if let Some(v) = &self.recall_index_dir {
+            m.insert(VAR_RECALL_INDEX_DIR, v.to_string_lossy().into_owned());
         }
         m
     }
@@ -643,7 +656,7 @@ impl Config {
             .unwrap_or_else(|| DEFAULT_LOG_FILTER.to_string());
 
         // --- recall ---
-        let recall = parse_recall(get)?;
+        let recall = parse_recall(get, &root_dir)?;
 
         Ok(Config {
             root_dir,
@@ -708,7 +721,8 @@ impl Config {
              include_hidden = {hidden}\n\
              include_hidden_globs = {hidden_globs}\n\
              log_filter = {log}\n\
-             recall_backend = {recall}",
+             recall_backend = {recall}\n\
+             recall_index_dir = {index_dir}",
             root = self.root_dir.display(),
             agents = if self.agents_dir.as_str().is_empty() {
                 "<vault root>"
@@ -731,6 +745,10 @@ impl Config {
             },
             log = self.log_filter,
             recall = self.recall.backend.as_str(),
+            index_dir = match &self.recall.index_dir {
+                Some(p) => p.display().to_string(),
+                None => "<in-memory only>".to_string(),
+            },
         )
     }
 
@@ -816,7 +834,10 @@ fn parse_transport(
 /// Parse the recall configuration block. The backend value is validated here; the
 /// effective backend (honouring the `recall-tantivy` feature) is resolved later by
 /// the engine. Tuning knobs fall back to their documented defaults.
-fn parse_recall(get: &dyn Fn(&str) -> Option<String>) -> Result<RecallConfig, MuninnError> {
+fn parse_recall(
+    get: &dyn Fn(&str) -> Option<String>,
+    root_dir: &std::path::Path,
+) -> Result<RecallConfig, MuninnError> {
     let backend = match get(VAR_RECALL_BACKEND).filter(|s| !s.is_empty()) {
         Some(raw) => RecallBackendKind::parse(&raw).ok_or_else(|| {
             config_err(format!(
@@ -846,13 +867,69 @@ fn parse_recall(get: &dyn Fn(&str) -> Option<String>) -> Result<RecallConfig, Mu
         VAR_RECALL_FRESHNESS_MS,
         DEFAULT_RECALL_FRESHNESS_MS,
     )?);
+    let index_dir = match get(VAR_RECALL_INDEX_DIR).filter(|s| !s.is_empty()) {
+        Some(raw) => Some(parse_index_dir(&raw, root_dir)?),
+        None => None,
+    };
     Ok(RecallConfig {
         backend,
         watch_debounce,
         regex_scan_byte_cap,
         max_resident_scopes,
         freshness,
+        index_dir,
     })
+}
+
+/// Validate the persistent-index directory: it must be absolute, and must not be
+/// the vault root or anything inside it — the recall watcher watches the vault root
+/// recursively, so index writes there would mark the engine dirty on every commit
+/// and force endless pointless reconciles.
+fn parse_index_dir(raw: &str, root_dir: &std::path::Path) -> Result<PathBuf, MuninnError> {
+    let path = PathBuf::from(raw);
+    if !path.is_absolute() {
+        return Err(config_err(format!(
+            "{VAR_RECALL_INDEX_DIR} must be an absolute path, got {raw:?}"
+        )));
+    }
+    // The directory need not exist yet (the engine creates it), so resolve the
+    // longest existing prefix and re-append the rest — enough to defeat symlinks
+    // and `..` pointing back into the vault.
+    let resolved = resolve_existing_prefix(&path);
+    if resolved == root_dir || resolved.starts_with(root_dir) {
+        return Err(config_err(format!(
+            "{VAR_RECALL_INDEX_DIR} ({raw}) is equal to or inside {VAR_ROOT_DIR} ({root}). The \
+             recall watcher watches the vault root recursively, so index writes there would mark \
+             the engine dirty on every commit; point it at a directory outside the vault",
+            root = root_dir.display()
+        )));
+    }
+    Ok(resolved)
+}
+
+/// Canonicalise the longest existing ancestor of `path` and re-append the
+/// components that do not exist yet.
+fn resolve_existing_prefix(path: &std::path::Path) -> PathBuf {
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor = path;
+    loop {
+        if let Ok(canonical) = cursor.canonicalize() {
+            let mut out = canonical;
+            for part in tail.iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        match (cursor.file_name(), cursor.parent()) {
+            (Some(name), Some(parent)) => {
+                tail.push(name.to_os_string());
+                cursor = parent;
+            }
+            // No existing ancestor (or a root that cannot be canonicalised):
+            // fall back to the path as written.
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 fn parse_u64(
@@ -1010,6 +1087,112 @@ mod tests {
 
         let err = build(with_root(&tmp, &[(VAR_RECALL_REGEX_SCAN_BYTES, "lots")])).unwrap_err();
         assert!(err.to_string().contains(VAR_RECALL_REGEX_SCAN_BYTES));
+    }
+
+    #[test]
+    fn recall_index_dir_defaults_to_none() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = build(with_root(&tmp, &[])).unwrap();
+        assert!(
+            cfg.recall.index_dir.is_none(),
+            "persistence must be opt-in: no index directory by default"
+        );
+        assert!(
+            cfg.describe()
+                .contains("recall_index_dir = <in-memory only>")
+        );
+    }
+
+    #[test]
+    fn recall_index_dir_is_canonicalised_and_reported() {
+        let tmp = TempDir::new().unwrap();
+        let index = TempDir::new().unwrap();
+        // A path whose leaf does not exist yet — the engine creates it.
+        let target = index.path().join("indexes");
+        let cfg = build(with_root(
+            &tmp,
+            &[(VAR_RECALL_INDEX_DIR, target.to_str().unwrap())],
+        ))
+        .unwrap();
+        assert_eq!(
+            cfg.recall.index_dir.as_deref(),
+            Some(
+                index
+                    .path()
+                    .canonicalize()
+                    .unwrap()
+                    .join("indexes")
+                    .as_path()
+            )
+        );
+        assert!(cfg.describe().contains("recall_index_dir = "));
+    }
+
+    #[test]
+    fn recall_index_dir_must_be_absolute() {
+        let tmp = TempDir::new().unwrap();
+        let err = build(with_root(&tmp, &[(VAR_RECALL_INDEX_DIR, "relative/index")])).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains(VAR_RECALL_INDEX_DIR), "{message}");
+        assert!(message.contains("absolute"), "{message}");
+    }
+
+    #[test]
+    fn recall_index_dir_inside_the_vault_root_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        // The root itself, an existing subdirectory, a not-yet-created
+        // subdirectory, and a traversal that lands back inside the vault.
+        std::fs::create_dir_all(root.join("existing")).unwrap();
+        let outside = TempDir::new().unwrap();
+        let traversal = outside
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("..")
+            .join(root.file_name().unwrap())
+            .join("index");
+        for candidate in [
+            root.clone(),
+            root.join("existing"),
+            root.join("not-yet-created/index"),
+            traversal,
+        ] {
+            let err = build(with_root(
+                &tmp,
+                &[(VAR_RECALL_INDEX_DIR, candidate.to_str().unwrap())],
+            ))
+            .err()
+            .unwrap_or_else(|| panic!("expected rejection of {}", candidate.display()));
+            let message = err.to_string();
+            assert!(message.contains(VAR_RECALL_INDEX_DIR), "{message}");
+            assert!(message.contains(VAR_ROOT_DIR), "{message}");
+        }
+    }
+
+    #[test]
+    fn cli_recall_index_dir_overrides_the_variable() {
+        let tmp = TempDir::new().unwrap();
+        let flagged = TempDir::new().unwrap();
+        let from_env = TempDir::new().unwrap();
+        let cli = Cli {
+            root_dir: Some(tmp.path().to_path_buf()),
+            recall_index_dir: Some(flagged.path().to_path_buf()),
+            ..Default::default()
+        };
+        let overrides = cli.as_overrides();
+        let env: HashMap<String, String> = [(
+            VAR_RECALL_INDEX_DIR.to_string(),
+            from_env.path().to_string_lossy().into_owned(),
+        )]
+        .into_iter()
+        .collect();
+        let cfg =
+            Config::build(&|k| overrides.get(k).cloned().or_else(|| env.get(k).cloned())).unwrap();
+        assert_eq!(
+            cfg.recall.index_dir.as_deref(),
+            Some(flagged.path().canonicalize().unwrap().as_path())
+        );
     }
 
     #[test]

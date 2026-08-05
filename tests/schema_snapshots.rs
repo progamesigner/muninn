@@ -69,6 +69,7 @@ fn recall_schema_for(scheme: &str) -> Value {
         regex_scan_byte_cap: usize::MAX,
         max_resident_scopes: 256,
         freshness: Duration::ZERO,
+        index_dir: None,
     };
     let recall =
         RecallEngine::new(Arc::new(Storage::new(mk(), true, false, &[])), config).map(Arc::new);

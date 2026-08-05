@@ -69,6 +69,15 @@ fn resolver(vault: &TempDir) -> PathResolver {
 /// long enough that queries never trigger a stat-diff reconcile mid-bench, so
 /// the timed routines isolate the backend scan.
 fn build_engine(vault: &TempDir, backend: RecallBackendKind) -> RecallEngine {
+    build_engine_with(vault, backend, None)
+}
+
+/// As [`build_engine`], with an optional persistent index directory.
+fn build_engine_with(
+    vault: &TempDir,
+    backend: RecallBackendKind,
+    index_dir: Option<&std::path::Path>,
+) -> RecallEngine {
     let storage = Arc::new(Storage::new(resolver(vault), true, false, &[]));
     let config = RecallConfig {
         backend,
@@ -76,6 +85,7 @@ fn build_engine(vault: &TempDir, backend: RecallBackendKind) -> RecallEngine {
         regex_scan_byte_cap: usize::MAX,
         max_resident_scopes: 256,
         freshness: Duration::from_secs(3600),
+        index_dir: index_dir.map(|p| p.to_path_buf()),
     };
     RecallEngine::new(storage, config).unwrap()
 }
@@ -148,5 +158,59 @@ fn own_write_update(c: &mut Criterion) {
     });
 }
 
+/// The payoff of `MUNINN_RECALL_INDEX_DIR`: startup over an empty index directory
+/// (read and tokenize every note) against startup over a persisted one (open the
+/// indexes, recover the manifest, stat-diff and find nothing to do). Same vault,
+/// same backend, same `warm()` call — only the directory's contents differ.
+#[cfg(feature = "recall-tantivy")]
+fn persistent_start(c: &mut Criterion) {
+    let vault = build_vault();
+    let mut group = c.benchmark_group("recall/persistent_start");
+    group.sample_size(10);
+
+    group.bench_function("cold_build_10k_notes", |b| {
+        b.iter_batched(
+            || {
+                let index = TempDir::new().unwrap();
+                let engine =
+                    build_engine_with(&vault, RecallBackendKind::Tantivy, Some(index.path()));
+                (index, engine)
+            },
+            |(index, engine)| {
+                engine.warm();
+                black_box((index, engine))
+            },
+            BatchSize::PerIteration,
+        )
+    });
+
+    // One build up front; every timed iteration reopens what it left behind.
+    let index = TempDir::new().unwrap();
+    build_engine_with(&vault, RecallBackendKind::Tantivy, Some(index.path())).warm();
+    group.bench_function("reopen_10k_notes", |b| {
+        b.iter_batched(
+            || build_engine_with(&vault, RecallBackendKind::Tantivy, Some(index.path())),
+            |engine| {
+                engine.warm();
+                // Nothing was re-read: the whole point of the comparison.
+                assert_eq!(engine.ingested_count(), 0);
+                black_box(engine)
+            },
+            BatchSize::PerIteration,
+        )
+    });
+
+    group.finish();
+}
+
+#[cfg(feature = "recall-tantivy")]
+criterion_group!(
+    benches,
+    cold_start,
+    warm_query,
+    own_write_update,
+    persistent_start
+);
+#[cfg(not(feature = "recall-tantivy"))]
 criterion_group!(benches, cold_start, warm_query, own_write_update);
 criterion_main!(benches);
