@@ -2027,9 +2027,74 @@ fn fields_schema<T: JsonSchema>() -> JsonObject {
     let generator = settings.into_generator();
     let schema = generator.into_root_schema_for::<T>();
     match serde_json::to_value(schema) {
-        Ok(Value::Object(object)) => object,
+        Ok(Value::Object(object)) => normalize_schema_object(object),
         _ => Map::new(),
     }
+}
+
+/// Recursively normalize a JSON Schema object for Gemini/OpenCode compatibility.
+///
+/// Converts `"type": [T, "null"]` (JSON Schema nullable-union shorthand) into
+/// just `"type": T`, relying on the field being absent from `required` to
+/// express optionality instead.  This avoids the `anyOf`-conversion path that
+/// Gemini's tool-schema parser rejects, particularly for array-typed fields.
+///
+/// Also strips `null` from `enum` arrays that originate from `Option<Enum>`
+/// derivation so the enum list stays clean.
+fn normalize_schema_object(mut obj: JsonObject) -> JsonObject {
+    // Normalise "type": [T, "null"]  →  "type": T
+    if let Some(Value::Array(types)) = obj.get("type").cloned() {
+        let non_null: Vec<Value> = types
+            .into_iter()
+            .filter(|v| v.as_str() != Some("null"))
+            .collect();
+        match non_null.as_slice() {
+            [single] => {
+                obj.insert("type".to_string(), single.clone());
+            }
+            _ if non_null.is_empty() => {
+                obj.remove("type");
+            }
+            _ => {
+                obj.insert("type".to_string(), Value::Array(non_null));
+            }
+        }
+    }
+
+    // Strip null from enum values (e.g. Option<Enum> emits null in the list)
+    if let Some(Value::Array(variants)) = obj.get("enum").cloned() {
+        let clean: Vec<Value> = variants
+            .into_iter()
+            .filter(|v| !v.is_null())
+            .collect();
+        obj.insert("enum".to_string(), Value::Array(clean));
+    }
+
+    // Recurse into properties
+    if let Some(Value::Object(props)) = obj.remove("properties") {
+        let normalised: JsonObject = props
+            .into_iter()
+            .map(|(k, v)| {
+                let v2 = if let Value::Object(inner) = v {
+                    Value::Object(normalize_schema_object(inner))
+                } else {
+                    v
+                };
+                (k, v2)
+            })
+            .collect();
+        obj.insert("properties".to_string(), Value::Object(normalised));
+    }
+
+    // Recurse into items (array element schema)
+    if let Some(Value::Object(items)) = obj.remove("items") {
+        obj.insert(
+            "items".to_string(),
+            Value::Object(normalize_schema_object(items)),
+        );
+    }
+
+    obj
 }
 
 /// Merge the scheme-derived scope fields (first) with a tool's own field schema
@@ -2241,5 +2306,107 @@ mod tests {
     #[test]
     fn slice_lines_offset_past_eof_is_empty() {
         assert_eq!(slice_lines("a\nb\n", range(5, None)), (String::new(), 2));
+    }
+
+    // --- normalize_schema_object tests ---
+
+    fn obj(json: serde_json::Value) -> JsonObject {
+        match json {
+            serde_json::Value::Object(m) => m,
+            _ => panic!("expected object"),
+        }
+    }
+
+    /// `["string", "null"]` collapses to `"string"`.
+    #[test]
+    fn normalize_nullable_string_type() {
+        let input = obj(json!({ "type": ["string", "null"], "description": "x" }));
+        let out = normalize_schema_object(input);
+        assert_eq!(out["type"], json!("string"));
+    }
+
+    /// `["array", "null"]` with items collapses to `"array"` while keeping items.
+    #[test]
+    fn normalize_nullable_array_type_preserves_items() {
+        let input = obj(json!({
+            "type": ["array", "null"],
+            "items": { "type": "string" }
+        }));
+        let out = normalize_schema_object(input);
+        assert_eq!(out["type"], json!("array"));
+        assert_eq!(out["items"], json!({ "type": "string" }));
+    }
+
+    /// `["integer", "null"]` collapses to `"integer"`.
+    #[test]
+    fn normalize_nullable_integer_type() {
+        let input = obj(json!({ "type": ["integer", "null"] }));
+        let out = normalize_schema_object(input);
+        assert_eq!(out["type"], json!("integer"));
+    }
+
+    /// `null` is stripped from enum variants.
+    #[test]
+    fn normalize_strips_null_from_enum() {
+        let input = obj(json!({
+            "type": ["string", "null"],
+            "enum": ["a", "b", null]
+        }));
+        let out = normalize_schema_object(input);
+        assert_eq!(out["enum"], json!(["a", "b"]));
+    }
+
+    /// Nested properties are recursively normalised.
+    #[test]
+    fn normalize_recurses_into_properties() {
+        let input = obj(json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": ["string", "null"] }
+            }
+        }));
+        let out = normalize_schema_object(input);
+        let props = out["properties"].as_object().unwrap();
+        assert_eq!(props["value"]["type"], json!("string"));
+    }
+
+    /// `items` inner schema is recursively normalised.
+    #[test]
+    fn normalize_recurses_into_items() {
+        let input = obj(json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "val": { "type": ["string", "null"] }
+                }
+            }
+        }));
+        let out = normalize_schema_object(input);
+        let item_props = out["items"]["properties"].as_object().unwrap();
+        assert_eq!(item_props["val"]["type"], json!("string"));
+    }
+
+    /// Fields-schema for `RecallFields` must not contain any nullable-union types.
+    #[test]
+    fn fields_schema_recall_has_no_nullable_type_arrays() {
+        fn has_type_array(v: &serde_json::Value) -> bool {
+            match v {
+                serde_json::Value::Object(m) => {
+                    if let Some(serde_json::Value::Array(_)) = m.get("type") {
+                        return true;
+                    }
+                    m.values().any(has_type_array)
+                }
+                serde_json::Value::Array(arr) => arr.iter().any(has_type_array),
+                _ => false,
+            }
+        }
+        let schema = fields_schema::<RecallFields>();
+        let v = serde_json::Value::Object(schema);
+        assert!(
+            !has_type_array(&v),
+            "schema still contains nullable-union type arrays: {v:#}"
+        );
     }
 }

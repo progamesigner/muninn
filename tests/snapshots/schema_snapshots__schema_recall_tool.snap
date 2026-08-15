@@ -14,10 +14,7 @@ expression: "recall_schema_for(\"<agent>.<user>\")"
       },
       "cursor": {
         "description": "Opaque pagination cursor returned by a previous call.",
-        "type": [
-          "string",
-          "null"
-        ]
+        "type": "string"
       },
       "filters": {
         "description": "Frontmatter property filters. Requires the tantivy backend; rejected with\n`unsupported` on the simple backend.",
@@ -43,10 +40,7 @@ expression: "recall_schema_for(\"<agent>.<user>\")"
             },
             "value": {
               "description": "The value to compare against (omitted for `exists`).",
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           "required": [
@@ -55,54 +49,33 @@ expression: "recall_schema_for(\"<agent>.<user>\")"
           ],
           "type": "object"
         },
-        "type": [
-          "array",
-          "null"
-        ]
+        "type": "array"
       },
       "limit": {
         "description": "Maximum number of hits to return (default 200, maximum 1000).",
         "format": "uint64",
         "minimum": 0,
-        "type": [
-          "integer",
-          "null"
-        ]
+        "type": "integer"
       },
       "modified_after": {
         "description": "Include only notes modified at or after this time. Accepts an RFC 3339\ntimestamp, or a bare `YYYY-MM-DD` date interpreted as start of day in the\nconfigured `MUNINN_TIMEZONE`. Bounds are half-open\n(`modified_after ≤ mtime < modified_before`) and compare the filesystem\nmtime, which restores and sync tools may have back-dated. Counts as a\nsufficient predicate on its own: with no `query`/`regex`/`filters`, hits\nare ordered by `modified_at` descending with `score: 1.0` and empty\n`snippets`.",
-        "type": [
-          "string",
-          "null"
-        ]
+        "type": "string"
       },
       "modified_before": {
         "description": "Include only notes modified strictly before this time. Same accepted\nformats, half-open semantics, and mtime caveat as `modified_after`.",
-        "type": [
-          "string",
-          "null"
-        ]
+        "type": "string"
       },
       "path_prefix": {
         "description": "Optional virtual-path prefix, relative to the agents folder, to filter by.",
-        "type": [
-          "string",
-          "null"
-        ]
+        "type": "string"
       },
       "query": {
         "description": "Full-text query. On the simple backend this is a case-insensitive\nsubstring match; on the tantivy backend it is BM25-ranked.",
-        "type": [
-          "string",
-          "null"
-        ]
+        "type": "string"
       },
       "regex": {
         "description": "Regular-expression query matched over note content.",
-        "type": [
-          "string",
-          "null"
-        ]
+        "type": "string"
       },
       "user": {
         "description": "Scope key 'user' identifying the caller.",

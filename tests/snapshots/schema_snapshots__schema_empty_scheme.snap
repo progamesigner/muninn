@@ -14,10 +14,7 @@ expression: "schemas_for(\"\")"
         },
         "title": {
           "description": "Optional short title for the entry; when present the heading reads\n`## <HH:MM:SS> — <title>`, otherwise `## <HH:MM:SS>`.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         }
       },
       "required": [
@@ -75,10 +72,7 @@ expression: "schemas_for(\"\")"
       "properties": {
         "content": {
           "description": "Single form: the full new contents of the selected file. `rules` content\nmust be ≤ 40 lines, `user` content ≤ 100 lines, and `memory` content\n≤ 200 lines.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "updates": {
           "description": "Batch form: 1 to 5 `{ which, content }` entries, each with the same\nsemantics as the single form; duplicate `which` values are rejected.\nEvery entry is validated — `which` domain, line caps, link expansion —\nbefore any file is written: any failure rejects the whole call leaving\nevery foundational file unchanged. Entries are applied in request order;\nthe result carries one `{ which, bytes_written }` entry per update, in\nrequest order. Each applied entry is atomic, but the batch is not\ntransactional across files: a crash mid-apply may leave a prefix of the\nentries applied.",
@@ -107,10 +101,7 @@ expression: "schemas_for(\"\")"
             ],
             "type": "object"
           },
-          "type": [
-            "array",
-            "null"
-          ]
+          "type": "array"
         },
         "which": {
           "description": "Single form: which foundational file to replace — one of persona, prompt,\nrules, user, memory. Requires `content`. Exactly one of the single form\n(`which` + `content`) or the batch form (`updates`) must be supplied;\nneither or both is rejected.",
@@ -119,13 +110,9 @@ expression: "schemas_for(\"\")"
             "prompt",
             "rules",
             "user",
-            "memory",
-            null
+            "memory"
           ],
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         }
       },
       "required": [],
@@ -140,52 +127,34 @@ expression: "schemas_for(\"\")"
         "cursor": {
           "default": null,
           "description": "Opaque pagination cursor returned by a previous call.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "glob": {
           "default": null,
           "description": "Optional glob pattern matched against each entry's clean, vault-root-relative\nvirtual path (e.g. `Agents/diary/2026-*`, `**/release.md`). Supports `*`, `**`,\n`?`, and character classes. Composes with `path_prefix` via AND (both must\nmatch). Filters paths only; reads no note contents.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "limit": {
           "default": null,
           "description": "Maximum number of entries to return (default 200, maximum 1000).",
           "format": "uint64",
           "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
+          "type": "integer"
         },
         "order": {
           "default": null,
           "description": "Optional ordering of results by clean virtual path: `name_asc` (the\ndefault) returns ascending path order; `name_desc` returns descending.\nOrdering is applied before pagination, so `limit`/`cursor` page over the\nordered set.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "path_prefix": {
           "default": null,
           "description": "Optional virtual-path prefix, relative to the agents folder, to filter by.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "view": {
           "default": null,
           "description": "Optional selector for what the items represent: `files` (the default)\nreturns individual note virtual paths; `dirs` returns the distinct\ndirectory virtual paths derived from the visible set — every ancestor\ndirectory of a visible note, deduplicated and deterministically ordered.\nThe `dirs` view honors `path_prefix`/`glob` and pagination and reads no\nnote contents.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         }
       },
       "required": [],
@@ -208,28 +177,19 @@ expression: "schemas_for(\"\")"
       "properties": {
         "backlinks": {
           "description": "When `true`, the structured result additionally carries a `backlinks`\narray: the clean virtual path of every visible note containing at least\none link that resolves to this note, deduplicated and sorted ascending.\nAbsent or `false` leaves the response unchanged.",
-          "type": [
-            "boolean",
-            "null"
-          ]
+          "type": "boolean"
         },
         "limit": {
           "description": "Optional maximum number of lines to return, counted from `offset`\n(default: all remaining lines).",
           "format": "uint64",
           "minimum": 1,
-          "type": [
-            "integer",
-            "null"
-          ]
+          "type": "integer"
         },
         "offset": {
           "description": "Optional 1-based line number of the first returned line (default 1).\nWhen `offset` or `limit` is supplied, the structured result additionally\ncarries `total_lines` — the line count of the full note — and an offset\npast the last line returns empty content rather than an error.",
           "format": "uint64",
           "minimum": 1,
-          "type": [
-            "integer",
-            "null"
-          ]
+          "type": "integer"
         },
         "path": {
           "description": "The virtual path of the note, relative to the vault root.",
@@ -380,10 +340,7 @@ expression: "schemas_for(\"\")"
       "properties": {
         "append": {
           "description": "When `true`, `content` is appended to the existing note verbatim —\nexact bytes, no implicit separator — and a missing note is created with\n`content` as its full body. Absent or `false` replaces the whole note.",
-          "type": [
-            "boolean",
-            "null"
-          ]
+          "type": "boolean"
         },
         "content": {
           "description": "The full new contents of the note; with `append: true`, the bytes to\nappend instead.",
@@ -413,10 +370,7 @@ expression: "schemas_for(\"\")"
             "properties": {
               "append": {
                 "description": "When `true`, `content` is appended to the existing note verbatim —\nexact bytes, no implicit separator — and a missing note is created with\n`content` as its full body. Absent or `false` replaces the whole note.",
-                "type": [
-                  "boolean",
-                  "null"
-                ]
+                "type": "boolean"
               },
               "content": {
                 "description": "The full new contents of the note; with `append: true`, the bytes to\nappend instead.",
