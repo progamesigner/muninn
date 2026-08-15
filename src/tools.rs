@@ -2094,6 +2094,37 @@ fn normalize_schema_object(mut obj: JsonObject) -> JsonObject {
         );
     }
 
+    // Recurse into schema-combination keywords and $defs
+    for key in &["anyOf", "oneOf", "allOf"] {
+        if let Some(Value::Array(schemas)) = obj.remove(*key) {
+            let normalised: Vec<Value> = schemas
+                .into_iter()
+                .map(|v| {
+                    if let Value::Object(inner) = v {
+                        Value::Object(normalize_schema_object(inner))
+                    } else {
+                        v
+                    }
+                })
+                .collect();
+            obj.insert((*key).to_string(), Value::Array(normalised));
+        }
+    }
+    if let Some(Value::Object(defs)) = obj.remove("$defs") {
+        let normalised: JsonObject = defs
+            .into_iter()
+            .map(|(k, v)| {
+                let v2 = if let Value::Object(inner) = v {
+                    Value::Object(normalize_schema_object(inner))
+                } else {
+                    v
+                };
+                (k, v2)
+            })
+            .collect();
+        obj.insert("$defs".to_string(), Value::Object(normalised));
+    }
+
     obj
 }
 

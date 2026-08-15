@@ -404,19 +404,13 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
                     "description": "Maximum number of lines to return (default: all remaining lines).",
                     "format": "uint64",
                     "minimum": 1,
-                    "type": [
-                      "integer",
-                      "null"
-                    ]
+                    "type": "integer"
                   },
                   "offset": {
                     "description": "1-based line number of the first returned line.",
                     "format": "uint64",
                     "minimum": 1,
-                    "type": [
-                      "integer",
-                      "null"
-                    ]
+                    "type": "integer"
                   },
                   "path": {
                     "description": "The virtual path of the note, relative to the vault root.",
