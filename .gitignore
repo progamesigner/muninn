@@ -2,6 +2,11 @@
 **/*.rs.bk
 *.pdb
 
+# Local secrets — never commit.
+.env
+.env.*
+!.env.example
+
 # Local, per-developer Claude Code settings — never commit.
 .claude/settings.local.json
 
