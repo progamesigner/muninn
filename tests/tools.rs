@@ -2747,7 +2747,7 @@ fn properties_read_root_core_file_is_readable() {
     call(
         &tb,
         "evolve_core_persona",
-        json!({"agent":"jarvis","user":"tony","which":"persona","content":"soul"}),
+        json!({"agent":"jarvis","user":"tony","updates":[{"which":"persona","content":"soul"}]}),
     )
     .unwrap();
     let body = structured(call(
@@ -2772,7 +2772,7 @@ fn properties_update_merges_and_returns_full_set_with_body_untouched() {
         "update_note_properties",
         json!({
             "agent":"jarvis","user":"tony","path":"Agents/topics/n.md",
-            "properties": { "status": "done", "reviewed": true, "priority": null },
+            "properties_json": json!({ "status": "done", "reviewed": true, "priority": null }).to_string(),
         }),
     ));
     assert_eq!(
@@ -2796,7 +2796,7 @@ fn properties_update_creates_block_when_absent() {
         "update_note_properties",
         json!({
             "agent":"jarvis","user":"tony","path":"Agents/topics/n.md",
-            "properties": { "status": "draft" },
+            "properties_json": json!({ "status": "draft" }).to_string(),
         }),
     )
     .unwrap();
@@ -2816,7 +2816,7 @@ fn properties_update_removes_emptied_block() {
         "update_note_properties",
         json!({
             "agent":"jarvis","user":"tony","path":"Agents/topics/n.md",
-            "properties": { "status": null },
+            "properties_json": json!({ "status": null }).to_string(),
         }),
     ));
     assert_eq!(body["properties"], json!({}));
@@ -2835,11 +2835,59 @@ fn properties_update_malformed_fence_is_invalid_argument_and_unchanged() {
             "update_note_properties",
             json!({
                 "agent":"jarvis","user":"tony","path":"Agents/topics/n.md",
-                "properties": { "status": "done" },
+                "properties_json": json!({ "status": "done" }).to_string(),
             }),
         ),
         "invalid_argument",
     );
+    assert_eq!(std::fs::read_to_string(physical).unwrap(), content);
+}
+
+#[test]
+fn properties_update_malformed_json_is_invalid_argument_and_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let tb = default_tb(&tmp);
+    let content = "---\nstatus: draft\n---\nThe body.\n";
+    let physical = seed_note(&tmp, &tb, content);
+    assert_code(
+        call(
+            &tb,
+            "update_note_properties",
+            json!({
+                "agent":"jarvis","user":"tony","path":"Agents/topics/n.md",
+                // Trailing comma: not valid JSON.
+                "properties_json": r#"{"status":"done",}"#,
+            }),
+        ),
+        "invalid_argument",
+    );
+    assert_eq!(std::fs::read_to_string(physical).unwrap(), content);
+}
+
+#[test]
+fn properties_update_non_object_json_is_invalid_argument_and_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let tb = default_tb(&tmp);
+    let content = "---\nstatus: draft\n---\nThe body.\n";
+    let physical = seed_note(&tmp, &tb, content);
+    for properties_json in [
+        json!(["status", "done"]).to_string(),
+        json!("done").to_string(),
+        json!(42).to_string(),
+        json!(null).to_string(),
+    ] {
+        assert_code(
+            call(
+                &tb,
+                "update_note_properties",
+                json!({
+                    "agent":"jarvis","user":"tony","path":"Agents/topics/n.md",
+                    "properties_json": properties_json,
+                }),
+            ),
+            "invalid_argument",
+        );
+    }
     assert_eq!(std::fs::read_to_string(physical).unwrap(), content);
 }
 
@@ -2856,7 +2904,7 @@ fn properties_update_root_core_file_is_reserved_naming_wrapper() {
             "update_note_properties",
             json!({
                 "agent":"jarvis","user":"tony","path":format!("Agents/{f}"),
-                "properties": { "status": "done" },
+                "properties_json": json!({ "status": "done" }).to_string(),
             }),
         );
         match res {
@@ -2883,7 +2931,7 @@ fn properties_update_outside_under_namespaced_is_denied_and_unchanged() {
             "update_note_properties",
             json!({
                 "agent":"jarvis","user":"tony","path":"Actions/release.md",
-                "properties": { "status": "done" },
+                "properties_json": json!({ "status": "done" }).to_string(),
             }),
         ),
         "write_denied",
@@ -2904,7 +2952,7 @@ fn properties_update_hidden_is_path_not_permitted() {
             "update_note_properties",
             json!({
                 "agent":"jarvis","user":"tony","path":"Agents/topics/.hidden.md",
-                "properties": { "status": "done" },
+                "properties_json": json!({ "status": "done" }).to_string(),
             }),
         ),
         "path_not_permitted",
@@ -2921,7 +2969,7 @@ fn properties_update_missing_is_not_found() {
             "update_note_properties",
             json!({
                 "agent":"jarvis","user":"tony","path":"Agents/topics/nope.md",
-                "properties": { "status": "done" },
+                "properties_json": json!({ "status": "done" }).to_string(),
             }),
         ),
         "not_found",
@@ -2956,7 +3004,7 @@ fn properties_update_expands_own_scope_link_on_disk_and_round_trips_clean() {
         "update_note_properties",
         json!({
             "agent":"jarvis","user":"tony","path":"Agents/topics/n.md",
-            "properties": { "related": "[[rust]]" },
+            "properties_json": json!({ "related": "[[rust]]" }).to_string(),
         }),
     ));
     // The result echoes the clean form the agent supplied...
@@ -3012,7 +3060,7 @@ fn properties_update_shared_note_linking_own_scope_is_refused_unchanged() {
             "update_note_properties",
             json!({
                 "agent":"jarvis","user":"tony","path":"Actions/release.md",
-                "properties": { "related": "[[rust]]" },
+                "properties_json": json!({ "related": "[[rust]]" }).to_string(),
             }),
         ),
         "write_denied",
@@ -3034,7 +3082,7 @@ fn properties_update_shared_target_stays_clean_on_disk() {
         "update_note_properties",
         json!({
             "agent":"jarvis","user":"tony","path":"Agents/topics/n.md",
-            "properties": { "related": "[[release]]" },
+            "properties_json": json!({ "related": "[[release]]" }).to_string(),
         }),
     )
     .unwrap();
@@ -3059,7 +3107,7 @@ fn properties_update_dangling_and_non_string_verbatim_nested_transformed() {
         "update_note_properties",
         json!({
             "agent":"jarvis","user":"tony","path":"Agents/topics/n.md",
-            "properties": clean,
+            "properties_json": clean.to_string(),
         }),
     ));
     // The response echoes the clean forms verbatim.
@@ -3112,7 +3160,7 @@ fn properties_update_is_immediately_recallable_via_filters() {
         "update_note_properties",
         json!({
             "agent":"jarvis","user":"tony","path":"Agents/topics/task.md",
-            "properties": { "status": "done" },
+            "properties_json": json!({ "status": "done" }).to_string(),
         }),
     )
     .unwrap();
@@ -3190,7 +3238,7 @@ fn edit_root_core_file_is_rejected_and_unchanged() {
     call(
         &tb,
         "evolve_core_persona",
-        json!({"agent":"jarvis","user":"tony","which":"memory","content":"alpha beta"}),
+        json!({"agent":"jarvis","user":"tony","updates":[{"which":"memory","content":"alpha beta"}]}),
     )
     .unwrap();
     assert_code(
@@ -3215,7 +3263,7 @@ fn delete_root_core_file_is_rejected_and_unchanged() {
     call(
         &tb,
         "evolve_core_persona",
-        json!({"agent":"jarvis","user":"tony","which":"persona","content":"soul"}),
+        json!({"agent":"jarvis","user":"tony","updates":[{"which":"persona","content":"soul"}]}),
     )
     .unwrap();
     assert_code(
@@ -3287,7 +3335,7 @@ fn load_session_context_all_present() {
         call(
             &tb,
             "evolve_core_persona",
-            json!({"agent":"jarvis","user":"tony","which":which,"content":format!("BODY-{which}")}),
+            json!({"agent":"jarvis","user":"tony","updates":[{"which":which,"content":format!("BODY-{which}")}]}),
         )
         .unwrap();
     }
@@ -3310,13 +3358,13 @@ fn load_session_context_some_missing() {
     call(
         &tb,
         "evolve_core_persona",
-        json!({"agent":"jarvis","user":"tony","which":"persona","content":"p"}),
+        json!({"agent":"jarvis","user":"tony","updates":[{"which":"persona","content":"p"}]}),
     )
     .unwrap();
     call(
         &tb,
         "evolve_core_persona",
-        json!({"agent":"jarvis","user":"tony","which":"rules","content":"r"}),
+        json!({"agent":"jarvis","user":"tony","updates":[{"which":"rules","content":"r"}]}),
     )
     .unwrap();
     let body = structured(call(
@@ -3379,7 +3427,7 @@ fn evolve_writes_each_foundational_file() {
         call(
             &tb,
             "evolve_core_persona",
-            json!({"agent":"jarvis","user":"tony","which":which,"content":which}),
+            json!({"agent":"jarvis","user":"tony","updates":[{"which":which,"content":which}]}),
         )
         .unwrap();
         let physical = tmp.path().join(format!(
@@ -3398,7 +3446,7 @@ fn evolve_invalid_which_is_rejected() {
         call(
             &tb,
             "evolve_core_persona",
-            json!({"agent":"jarvis","user":"tony","which":"bogus","content":"x"}),
+            json!({"agent":"jarvis","user":"tony","updates":[{"which":"bogus","content":"x"}]}),
         ),
         "invalid_argument",
     );
@@ -3412,7 +3460,7 @@ fn evolve_rejects_path_arg() {
         call(
             &tb,
             "evolve_core_persona",
-            json!({"agent":"jarvis","user":"tony","which":"persona","content":"x","path":"y"}),
+            json!({"agent":"jarvis","user":"tony","updates":[{"which":"persona","content":"x"}],"path":"y"}),
         ),
         "invalid_argument",
     );
@@ -3426,7 +3474,7 @@ fn evolve_under_readonly_is_denied() {
         call(
             &tb,
             "evolve_core_persona",
-            json!({"agent":"jarvis","user":"tony","which":"persona","content":"x"}),
+            json!({"agent":"jarvis","user":"tony","updates":[{"which":"persona","content":"x"}]}),
         ),
         "write_denied",
     );
@@ -3440,7 +3488,7 @@ fn evolve_user_within_cap_succeeds() {
     call(
         &tb,
         "evolve_core_persona",
-        json!({"agent":"jarvis","user":"tony","which":"user","content":content}),
+        json!({"agent":"jarvis","user":"tony","updates":[{"which":"user","content":content}]}),
     )
     .unwrap();
 }
@@ -3454,7 +3502,7 @@ fn evolve_user_over_cap_is_rejected_and_unchanged() {
         call(
             &tb,
             "evolve_core_persona",
-            json!({"agent":"jarvis","user":"tony","which":"user","content":content}),
+            json!({"agent":"jarvis","user":"tony","updates":[{"which":"user","content":content}]}),
         ),
         "invalid_argument",
     );
@@ -3473,7 +3521,7 @@ fn evolve_memory_within_cap_succeeds() {
     call(
         &tb,
         "evolve_core_persona",
-        json!({"agent":"jarvis","user":"tony","which":"memory","content":content}),
+        json!({"agent":"jarvis","user":"tony","updates":[{"which":"memory","content":content}]}),
     )
     .unwrap();
 }
@@ -3487,7 +3535,7 @@ fn evolve_memory_over_cap_is_rejected_and_unchanged() {
         call(
             &tb,
             "evolve_core_persona",
-            json!({"agent":"jarvis","user":"tony","which":"memory","content":content}),
+            json!({"agent":"jarvis","user":"tony","updates":[{"which":"memory","content":content}]}),
         ),
         "invalid_argument",
     );
@@ -3506,7 +3554,7 @@ fn evolve_rules_within_cap_succeeds() {
     call(
         &tb,
         "evolve_core_persona",
-        json!({"agent":"jarvis","user":"tony","which":"rules","content":content}),
+        json!({"agent":"jarvis","user":"tony","updates":[{"which":"rules","content":content}]}),
     )
     .unwrap();
 }
@@ -3519,7 +3567,7 @@ fn evolve_rules_over_cap_is_rejected_and_unchanged() {
     let res = call(
         &tb,
         "evolve_core_persona",
-        json!({"agent":"jarvis","user":"tony","which":"rules","content":content}),
+        json!({"agent":"jarvis","user":"tony","updates":[{"which":"rules","content":content}]}),
     );
     match res {
         Err(e) => {
@@ -3536,20 +3584,21 @@ fn evolve_rules_over_cap_is_rejected_and_unchanged() {
 }
 
 #[test]
-fn evolve_single_form_response_is_the_byte_count() {
+fn evolve_single_entry_response_is_the_results_array_shape() {
     let tmp = TempDir::new().unwrap();
     let tb = default_tb(&tmp);
     let body = structured(call(
         &tb,
         "evolve_core_persona",
-        json!({"agent":"jarvis","user":"tony","which":"persona","content":"soul"}),
+        json!({"agent":"jarvis","user":"tony","updates":[{"which":"persona","content":"soul"}]}),
     ));
-    // The legacy single-form response shape, byte-identical to before the
-    // batch form existed: just the byte count.
-    assert_eq!(body, json!({"bytes_written": "soul".len()}));
+    // A one-element `updates` array still returns the `results` array shape,
+    // never a bare `{ bytes_written }`.
+    assert_eq!(
+        body,
+        json!({"results": [{"which":"persona","bytes_written": "soul".len()}]})
+    );
 }
-
-// --- evolve_core_persona (batch form) ---
 
 #[test]
 fn evolve_batch_writes_files_with_results_in_request_order() {
@@ -3660,7 +3709,7 @@ fn evolve_batch_empty_updates_is_rejected() {
 }
 
 #[test]
-fn evolve_neither_form_is_rejected() {
+fn evolve_missing_updates_is_rejected() {
     let tmp = TempDir::new().unwrap();
     let tb = default_tb(&tmp);
     assert_code(
@@ -3674,38 +3723,21 @@ fn evolve_neither_form_is_rejected() {
 }
 
 #[test]
-fn evolve_both_forms_are_rejected_and_unchanged() {
+fn evolve_top_level_which_content_is_rejected_and_unchanged() {
     let tmp = TempDir::new().unwrap();
     let tb = default_tb(&tmp);
     assert_code(
         call(
             &tb,
             "evolve_core_persona",
-            json!({"agent":"jarvis","user":"tony","which":"persona","content":"single",
-                   "updates":[{"which":"rules","content":"batch"}]}),
+            json!({"agent":"jarvis","user":"tony","which":"persona","content":"soul"}),
         ),
         "invalid_argument",
     );
-    for rel in [
-        "Agents/jarvis.tony/PERSONA.jarvis.tony.md",
-        "Agents/jarvis.tony/RULES.jarvis.tony.md",
-    ] {
-        assert!(!tmp.path().join(rel).exists(), "{rel} must not exist");
-    }
-}
-
-#[test]
-fn evolve_batch_under_readonly_is_denied() {
-    let tmp = TempDir::new().unwrap();
-    let tb = toolbox(&tmp, "Agents", "<agent>.<user>", Policy::Readonly);
-    assert_code(
-        call(
-            &tb,
-            "evolve_core_persona",
-            json!({"agent":"jarvis","user":"tony",
-                   "updates":[{"which":"persona","content":"x"}]}),
-        ),
-        "write_denied",
+    assert!(
+        !tmp.path()
+            .join("Agents/jarvis.tony/PERSONA.jarvis.tony.md")
+            .exists()
     );
 }
 
@@ -4151,6 +4183,20 @@ fn recall_requires_a_content_or_time_predicate() {
             &tb,
             "recall_memory_notes",
             json!({"agent":"jarvis","user":"tony"}),
+        ),
+        "invalid_argument",
+    );
+}
+
+#[test]
+fn recall_empty_filters_array_does_not_count_as_a_predicate() {
+    let tmp = TempDir::new().unwrap();
+    let tb = recall_toolbox(&tmp);
+    assert_code(
+        call(
+            &tb,
+            "recall_memory_notes",
+            json!({"agent":"jarvis","user":"tony","filters":[]}),
         ),
         "invalid_argument",
     );

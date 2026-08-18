@@ -156,7 +156,7 @@ fn core_file_links_expand_on_disk_and_strip_in_session_context() {
     call(
         &tb,
         "evolve_core_persona",
-        json!({"agent":"jarvis","user":"tony","which":"memory","content":"- [[rust]] — the rust note"}),
+        json!({"agent":"jarvis","user":"tony","updates":[{"which":"memory","content":"- [[rust]] — the rust note"}]}),
     )
     .unwrap();
 
@@ -232,7 +232,7 @@ fn property_round_trip_matches_body_round_trip() {
         &tb,
         "update_note_properties",
         json!({"agent":"jarvis","user":"tony","path":"Agents/notes/b.md",
-               "properties": { "related": "[[rust]]" }}),
+               "properties_json": json!({ "related": "[[rust]]" }).to_string()}),
     )
     .unwrap();
 
@@ -281,7 +281,7 @@ fn property_only_link_counts_toward_backlinks() {
         &tb,
         "update_note_properties",
         json!({"agent":"jarvis","user":"tony","path":"Agents/notes/memo.md",
-               "properties": { "related": "[[rust]]" }}),
+               "properties_json": json!({ "related": "[[rust]]" }).to_string()}),
     )
     .unwrap();
 

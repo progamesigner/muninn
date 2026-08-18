@@ -55,7 +55,7 @@ async fn resource_template_and_read_render_context() {
     service
         .call_tool(
             CallToolRequestParams::new("evolve_core_persona").with_arguments(
-                json!({"agent":"jarvis","user":"tony","which":"persona","content":"PERSONA-BODY"})
+                json!({"agent":"jarvis","user":"tony","updates":[{"which":"persona","content":"PERSONA-BODY"}]})
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -111,7 +111,7 @@ async fn bootstrap_and_layout_resources_render() {
     service
         .call_tool(
             CallToolRequestParams::new("evolve_core_persona").with_arguments(
-                json!({"agent":"jarvis","user":"tony","which":"rules","content":"RULES-BODY"})
+                json!({"agent":"jarvis","user":"tony","updates":[{"which":"rules","content":"RULES-BODY"}]})
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -168,7 +168,7 @@ async fn onboarding_directive_appears_for_a_fresh_scope() {
     assert!(text.contains("Onboarding needed"));
     assert!(text.contains("identity, role, working style, and boundaries"));
     assert!(text.contains("evolve_core_persona"));
-    assert!(text.contains("`updates` batch form"));
+    assert!(text.contains("`updates` array entry per file"));
 
     service.cancel().await.unwrap();
 }
@@ -181,7 +181,7 @@ async fn prompt_lists_args_and_renders() {
     service
         .call_tool(
             CallToolRequestParams::new("evolve_core_persona").with_arguments(
-                json!({"agent":"jarvis","user":"tony","which":"persona","content":"PROMPT-PERSONA"})
+                json!({"agent":"jarvis","user":"tony","updates":[{"which":"persona","content":"PROMPT-PERSONA"}]})
                     .as_object()
                     .unwrap()
                     .clone(),
