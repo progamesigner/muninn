@@ -14,22 +14,28 @@ modification time as an RFC 3339 UTC timestamp sourced from the in-memory index
 manifest. The tool SHALL accept the active scope keys plus optional `query`
 (full-text), `filters` (frontmatter property predicates), `regex`,
 `modified_after`, `modified_before`, `path_prefix`, `limit`, and `cursor`
-arguments. At least one of `query`, `filters`, `regex`, `modified_after`, or
-`modified_before` MUST be supplied. The `query` and `regex` matchers SHALL be
-evaluated against each note's clean virtual path in addition to its body; a path
-match SHALL contribute to the relevance score with equal weight to a body match.
-When a note matches only on its path, it SHALL still be returned as a hit, with the
-matching path surfaced as a snippet.
+arguments. `filters` is present in the tool's input schema `required` array with
+a non-nullable array type — a caller supplies no property filters by sending
+`filters: []` (or, for a caller that does not populate every schema-declared
+key, by omitting the key entirely; the tool SHALL treat an absent `filters` key
+and an empty `filters` array identically). At least one of `query`, a non-empty
+`filters`, `regex`, `modified_after`, or `modified_before` MUST be supplied. The
+`query` and `regex` matchers SHALL be evaluated against each note's clean
+virtual path in addition to its body; a path match SHALL contribute to the
+relevance score with equal weight to a body match. When a note matches only on
+its path, it SHALL still be returned as a hit, with the matching path surfaced
+as a snippet.
 
 `modified_after` and `modified_before` SHALL each accept an RFC 3339 timestamp or
 a bare `YYYY-MM-DD` date, the latter interpreted as start of day in the configured
 `MUNINN_TIMEZONE`; any other value SHALL be rejected with `invalid_argument`.
 The bounds form a half-open interval (`modified_after ≤ mtime < modified_before`)
 applied identically on every backend. When at least one of `query`, `regex`, or
-`filters` is present, hits remain ordered by descending normalized score and the
-time bounds act as a filter. When only time bounds are supplied, hits SHALL be
-drawn from the index manifest without a content scan, carry `score: 1.0` and empty
-`snippets`, and be ordered by `modified_at` descending then path ascending.
+a non-empty `filters` is present, hits remain ordered by descending normalized
+score and the time bounds act as a filter. When only time bounds are supplied,
+hits SHALL be drawn from the index manifest without a content scan, carry
+`score: 1.0` and empty `snippets`, and be ordered by `modified_at` descending
+then path ascending.
 
 #### Scenario: Full-text recall returns ranked hits
 - **WHEN** the tool is invoked with `query="borrow checker"` for the active scope and
@@ -50,10 +56,16 @@ drawn from the index manifest without a content scan, carry `score: 1.0` and emp
   path match and a single body match yield comparable raw scores before normalization
 
 #### Scenario: Empty recall is rejected
-- **WHEN** the tool is invoked with none of `query`, `filters`, `regex`,
-  `modified_after`, or `modified_before` supplied
+- **WHEN** the tool is invoked with `query`, `regex`, `modified_after`, and
+  `modified_before` all absent, and `filters` either absent or an empty array
 - **THEN** the response is an MCP error with code `invalid_argument` and no full dump
   of the vault is returned
+
+#### Scenario: An empty filters array does not count as supplying filters
+- **WHEN** the tool is invoked with `filters: []` and every other predicate argument
+  absent
+- **THEN** the call is rejected identically to the "Empty recall is rejected"
+  scenario — an empty array carries the same meaning as an absent `filters` key
 
 #### Scenario: Time-only recall returns recent notes
 - **WHEN** the tool is invoked with only `modified_after="2026-06-09"` and the scope
