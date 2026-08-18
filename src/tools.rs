@@ -38,8 +38,8 @@ const MAX_LIMIT: u64 = 1000;
 const MAX_BATCH_READ: usize = 20;
 /// The maximum number of entries accepted by `write_memory_notes`.
 const MAX_BATCH_WRITE: usize = 20;
-/// The maximum number of entries accepted by `evolve_core_persona`'s batch form
-/// (one per foundational file).
+/// The maximum number of entries accepted by `evolve_core_persona`'s `updates`
+/// array (one per foundational file).
 const MAX_BATCH_EVOLVE: usize = 5;
 
 /// The set of tool names this server exposes, in advertised order.
@@ -256,10 +256,15 @@ struct PropertiesUpdateFields {
     /// The virtual path of the note, relative to the vault root. The note must
     /// already exist.
     path: String,
-    /// The properties to merge into the note's frontmatter. Each key is upserted
-    /// with its JSON value (strings, numbers, booleans, arrays, and nested
-    /// objects round-trip); a key supplied with an explicit `null` is deleted.
-    properties: Map<String, Value>,
+    /// The properties to merge into the note's frontmatter, JSON-encoded as a
+    /// string (e.g. `"{\"status\":\"done\",\"priority\":null}"`) — the caller's
+    /// key set is arbitrary, which a closed JSON Schema object cannot describe,
+    /// so it is carried as an opaque string instead of a nested object. Each
+    /// decoded key is upserted with its JSON value (strings, numbers, booleans,
+    /// arrays, and nested objects round-trip); a key supplied with an explicit
+    /// `null` is deleted. The string must decode to a JSON object; malformed
+    /// JSON or a non-object top-level value is rejected with `invalid_argument`.
+    properties_json: String,
 }
 
 #[derive(JsonSchema)]
@@ -278,8 +283,8 @@ enum Which {
     Memory,
 }
 
-/// One batch `evolve_core_persona` entry: a foundational file and its full new
-/// contents, with the same per-entry semantics as the single form.
+/// One `evolve_core_persona` `updates` entry: a foundational file and its full
+/// new contents.
 #[derive(JsonSchema)]
 #[allow(dead_code)]
 struct EvolveUpdateEntry {
@@ -293,25 +298,16 @@ struct EvolveUpdateEntry {
 #[derive(JsonSchema)]
 #[allow(dead_code)]
 struct EvolveFields {
-    /// Single form: which foundational file to replace — one of persona, prompt,
-    /// rules, user, memory. Requires `content`. Exactly one of the single form
-    /// (`which` + `content`) or the batch form (`updates`) must be supplied;
-    /// neither or both is rejected.
-    which: Option<Which>,
-    /// Single form: the full new contents of the selected file. `rules` content
-    /// must be ≤ 40 lines, `user` content ≤ 100 lines, and `memory` content
-    /// ≤ 200 lines.
-    content: Option<String>,
-    /// Batch form: 1 to 5 `{ which, content }` entries, each with the same
-    /// semantics as the single form; duplicate `which` values are rejected.
-    /// Every entry is validated — `which` domain, line caps, link expansion —
-    /// before any file is written: any failure rejects the whole call leaving
-    /// every foundational file unchanged. Entries are applied in request order;
-    /// the result carries one `{ which, bytes_written }` entry per update, in
-    /// request order. Each applied entry is atomic, but the batch is not
-    /// transactional across files: a crash mid-apply may leave a prefix of the
-    /// entries applied.
-    updates: Option<Vec<EvolveUpdateEntry>>,
+    /// 1 to 5 `{ which, content }` entries; a single-file update is a
+    /// one-element array. Duplicate `which` values are rejected. Every entry
+    /// is validated — `which` domain, line caps, link expansion — before any
+    /// file is written: any failure rejects the whole call leaving every
+    /// foundational file unchanged. Entries are applied in request order; the
+    /// result carries one `{ which, bytes_written }` entry per update, in
+    /// request order, even when there is only one. Each applied entry is
+    /// atomic, but the call is not transactional across files: a crash
+    /// mid-apply may leave a prefix of the entries applied.
+    updates: Vec<EvolveUpdateEntry>,
 }
 
 #[derive(JsonSchema)]
@@ -366,8 +362,9 @@ struct RecallFields {
     /// Regular-expression query matched over note content.
     regex: Option<String>,
     /// Frontmatter property filters. Requires the tantivy backend; rejected with
-    /// `unsupported` on the simple backend.
-    filters: Option<Vec<PropertyFilterField>>,
+    /// `unsupported` on the simple backend. An empty array means "no property
+    /// filters" — the same as omitting this argument.
+    filters: Vec<PropertyFilterField>,
     /// Include only notes modified at or after this time. Accepts an RFC 3339
     /// timestamp, or a bare `YYYY-MM-DD` date interpreted as start of day in the
     /// configured `MUNINN_TIMEZONE`. Bounds are half-open
@@ -1352,9 +1349,9 @@ impl Toolbox {
     }
 
     fn update_note_properties(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
-        let scope = self.resolve_scope(args, &["path", "properties"])?;
+        let scope = self.resolve_scope(args, &["path", "properties_json"])?;
         let vpath = VirtualPath::new(&require_str(args, "path")?)?;
-        let updates = require_object(args, "properties")?;
+        let updates = require_json_object(args, "properties_json")?;
         self.reject_if_root_reserved(&vpath)?;
         let region = self.storage.resolver().detect_region(&vpath);
         self.policy
@@ -1412,36 +1409,13 @@ impl Toolbox {
         ))
     }
 
-    /// Replace foundational session files: the single `which`/`content` form
-    /// writes one file with the legacy response, the batch `updates` form
-    /// validates every entry (which domain, duplicates, line caps, link
-    /// expansion, policy, visibility) before writing any file, then applies in
-    /// request order. Exactly one of the two forms must be supplied.
+    /// Replace foundational session files via a single required `updates`
+    /// array of 1 to 5 `{ which, content }` entries (a single-file update is
+    /// a one-element array). Every entry is validated — which domain,
+    /// duplicates, line caps, link expansion, policy, visibility — before any
+    /// file is written, then applies in request order.
     fn evolve_core_persona(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
-        let scope = self.resolve_scope(args, &["which", "content", "updates"])?;
-        let has_single = args.contains_key("which") || args.contains_key("content");
-        let has_batch = args.contains_key("updates");
-        if has_single && has_batch {
-            return Err(MuninnError::InvalidArgument {
-                message: "supply either 'which'/'content' or 'updates', not both".to_string(),
-            });
-        }
-        if !has_single && !has_batch {
-            return Err(MuninnError::InvalidArgument {
-                message: "supply either 'which' and 'content', or an 'updates' array".to_string(),
-            });
-        }
-
-        if has_single {
-            let which = require_str(args, "which")?;
-            let (filename, line_cap) = evolve_target(&which)?;
-            let content = require_str(args, "content")?;
-            let (vpath, content) =
-                self.prepare_evolve_content(&scope, filename, line_cap, &content)?;
-            return self.gated_write(&scope, &vpath, |physical, storage| {
-                storage.write_atomic(physical, &content)
-            });
-        }
+        let scope = self.resolve_scope(args, &["updates"])?;
 
         let raw_updates = match args.get("updates") {
             Some(Value::Array(items)) => items,
@@ -1450,7 +1424,11 @@ impl Toolbox {
                     message: "argument 'updates' must be an array".to_string(),
                 });
             }
-            None => unreachable!("has_batch checked above"),
+            None => {
+                return Err(MuninnError::InvalidArgument {
+                    message: "missing required argument 'updates'".to_string(),
+                });
+            }
         };
         if raw_updates.is_empty() {
             return Err(MuninnError::InvalidArgument {
@@ -1765,16 +1743,29 @@ fn require_str(args: &JsonObject, key: &str) -> Result<String, MuninnError> {
     }
 }
 
-/// Require a JSON-object argument, erroring with `invalid_argument` when absent
-/// or of the wrong type.
-fn require_object(args: &JsonObject, key: &str) -> Result<Map<String, Value>, MuninnError> {
-    match args.get(key) {
-        Some(Value::Object(o)) => Ok(o.clone()),
-        Some(_) => Err(MuninnError::InvalidArgument {
-            message: format!("argument '{key}' must be an object"),
-        }),
-        None => Err(MuninnError::InvalidArgument {
-            message: format!("missing required argument '{key}'"),
+/// Require a string argument whose content is JSON that decodes to an object,
+/// erroring with `invalid_argument` when the argument is absent, not a
+/// string, not valid JSON, or valid JSON that decodes to something other than
+/// an object.
+fn require_json_object(args: &JsonObject, key: &str) -> Result<Map<String, Value>, MuninnError> {
+    let raw = require_str(args, key)?;
+    let value: Value = serde_json::from_str(&raw).map_err(|e| MuninnError::InvalidArgument {
+        message: format!("argument '{key}' is not valid JSON: {e}"),
+    })?;
+    match value {
+        Value::Object(map) => Ok(map),
+        other => Err(MuninnError::InvalidArgument {
+            message: format!(
+                "argument '{key}' must decode to a JSON object, got {}",
+                match other {
+                    Value::Null => "null",
+                    Value::Bool(_) => "a boolean",
+                    Value::Number(_) => "a number",
+                    Value::String(_) => "a string",
+                    Value::Array(_) => "an array",
+                    Value::Object(_) => unreachable!("matched above"),
+                }
+            ),
         }),
     }
 }
@@ -2032,8 +2023,10 @@ fn fields_schema<T: JsonSchema>() -> JsonObject {
     }
 }
 
-/// Merge the scheme-derived scope fields (first) with a tool's own field schema
-/// into a single object input schema with `additionalProperties: false`.
+/// Merge the scheme-derived scope fields (first) with a tool's own field
+/// schema into a single object input schema. `required`/`additionalProperties`
+/// are filled in uniformly, at every nesting level, by [`normalize_schema`]
+/// afterward — not computed here.
 fn merge_schema(scheme: &Scheme, fields: JsonObject) -> JsonObject {
     let scope = scheme.to_json_schema();
 
@@ -2049,25 +2042,79 @@ fn merge_schema(scheme: &Scheme, fields: JsonObject) -> JsonObject {
         }
     }
 
-    let mut required = Vec::new();
-    if let Some(Value::Array(sr)) = scope.get("required") {
-        required.extend(sr.iter().cloned());
-    }
-    if let Some(Value::Array(fr)) = fields.get("required") {
-        required.extend(fr.iter().cloned());
-    }
-
     let mut out = Map::new();
     out.insert("type".to_string(), json!("object"));
     out.insert("properties".to_string(), Value::Object(properties));
-    out.insert("required".to_string(), Value::Array(required));
-    out.insert("additionalProperties".to_string(), json!(false));
     out
+}
+
+/// Recursively close every object subschema (root and nested) by setting
+/// `additionalProperties: false` and expanding `required` to every key in
+/// that object's `properties` — the shape OpenAI's and Anthropic's
+/// `strict: true` tool calling requires. A node with no `properties` key
+/// (an intentionally open, arbitrary-shaped object) is left untouched.
+/// Also strips the non-standard `format: "uint64"` annotation `schemars`
+/// emits on `u64` fields, which no target validator recognizes.
+fn normalize_schema_object(schema: &mut Value) {
+    match schema {
+        Value::Object(map) => {
+            if map.get("format") == Some(&json!("uint64")) {
+                map.remove("format");
+            }
+            // Anthropic's `strict: true` tool use rejects `minimum`/`maximum` on
+            // integer fields outright; `multipleOf` is stripped defensively as
+            // the same class of numeric-range keyword, though nothing in the
+            // fleet emits it today. Range enforcement has always lived in the
+            // handlers (`opt_positive`, `MAX_LIMIT`), never in the schema.
+            for key in ["minimum", "maximum", "multipleOf"] {
+                map.remove(key);
+            }
+            if let Some(Value::Object(properties)) = map.get("properties") {
+                let required: Vec<Value> = properties.keys().map(|k| json!(k)).collect();
+                map.insert("required".to_string(), Value::Array(required));
+                map.insert("additionalProperties".to_string(), json!(false));
+            }
+            if let Some(Value::Object(properties)) = map.get_mut("properties") {
+                for value in properties.values_mut() {
+                    normalize_schema_object(value);
+                }
+            }
+            if let Some(items) = map.get_mut("items") {
+                normalize_schema_object(items);
+            }
+            for key in ["anyOf", "oneOf", "allOf"] {
+                if let Some(variants) = map.get_mut(key) {
+                    normalize_schema_object(variants);
+                }
+            }
+            if let Some(Value::Object(defs)) = map.get_mut("$defs") {
+                for value in defs.values_mut() {
+                    normalize_schema_object(value);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                normalize_schema_object(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// [`normalize_schema_object`] over a whole tool input schema.
+fn normalize_schema(schema: JsonObject) -> JsonObject {
+    let mut value = Value::Object(schema);
+    normalize_schema_object(&mut value);
+    match value {
+        Value::Object(map) => map,
+        _ => unreachable!("normalize_schema_object preserves the root's Object variant"),
+    }
 }
 
 fn tool(name: &'static str, description: &'static str, schema: JsonObject) -> Tool {
     // `Tool` is `#[non_exhaustive]`; use its constructor rather than a struct literal.
-    Tool::new(name, description, schema)
+    Tool::new(name, description, normalize_schema(schema))
 }
 
 /// Assemble the tool list for a given scheme. The `recall_memory_notes` tool is
@@ -2121,7 +2168,7 @@ fn build_tools(scheme: &Scheme, recall_enabled: bool) -> Vec<Tool> {
         ),
         tool(
             "update_note_properties",
-            "Merge a JSON object into a note's frontmatter atomically: each key is upserted, an explicit `null` deletes a key, and the note body is untouched. The block is created when absent, removed when the merge empties it, and re-serialized in normalized form (stable key order; comments and formatting are not preserved). `[[wikilink]]` targets in string values (including inside arrays and nested objects) are persisted in their resolvable on-disk form, exactly as a whole-file write would store them. Returns the full post-update `{ properties }` in the clean agent-facing form — what you write is what you read back.",
+            "Merge a JSON object into a note's frontmatter atomically. The object is supplied as `properties_json`, a JSON-encoded string (e.g. `\"{\\\"status\\\":\\\"done\\\",\\\"priority\\\":null}\"`), since the caller's key set is arbitrary and cannot be described as a fixed schema; each decoded key is upserted, an explicit `null` deletes a key, and the note body is untouched. `properties_json` must decode to a JSON object — malformed JSON or a non-object value is rejected with `invalid_argument`. The block is created when absent, removed when the merge empties it, and re-serialized in normalized form (stable key order; comments and formatting are not preserved). `[[wikilink]]` targets in string values (including inside arrays and nested objects) are persisted in their resolvable on-disk form, exactly as a whole-file write would store them. Returns the full post-update `{ properties }` (a JSON object, not JSON-encoded) in the clean agent-facing form — what you write is what you read back.",
             merge_schema(scheme, fields_schema::<PropertiesUpdateFields>()),
         ),
         tool(
@@ -2131,7 +2178,7 @@ fn build_tools(scheme: &Scheme, recall_enabled: bool) -> Vec<Tool> {
         ),
         tool(
             "evolve_core_persona",
-            "Atomically replace foundational session files (persona|prompt|rules|user|memory): a single file via `which` + `content`, or several in one call via an `updates` array of 1–5 { which, content } entries (no duplicate `which`), validated as a unit before any write — supply exactly one form. When bootstrapping missing foundational files, interview the user first (identity, role, working style, boundaries), distill the answers into your own concise wording, then commit all affected files in one batch call. Enforces caps: RULES.md ≤ 40 lines, USER.md ≤ 100 lines, MEMORY.md ≤ 200 lines.",
+            "Atomically replace foundational session files (persona|prompt|rules|user|memory) via the single required argument `updates`: an array of 1–5 { which, content } entries (no duplicate `which`) — a single-file update is a one-element array. Every entry is validated as a unit before any write; the response always carries `results`, one { which, bytes_written } entry per update, in request order, even for a single entry. When bootstrapping missing foundational files, interview the user first (identity, role, working style, boundaries), distill the answers into your own concise wording, then commit all affected files in one batch call. Enforces caps: RULES.md ≤ 40 lines, USER.md ≤ 100 lines, MEMORY.md ≤ 200 lines.",
             merge_schema(scheme, fields_schema::<EvolveFields>()),
         ),
         tool(
@@ -2148,7 +2195,7 @@ fn build_tools(scheme: &Scheme, recall_enabled: bool) -> Vec<Tool> {
     if recall_enabled {
         tools.push(tool(
             "recall_memory_notes",
-            "Search memory notes by content within the caller's visible set. Returns ranked hits as { path, score (0-1), snippets, modified_at }. Supply at least one of `query` (full-text), `regex`, `filters` (frontmatter properties; tantivy backend only), or the `modified_after`/`modified_before` time bounds. With time bounds alone, hits are ordered by recency. Paginated like list_memory_notes.",
+            "Search memory notes by content within the caller's visible set. Returns ranked hits as { path, score (0-1), snippets, modified_at }. `filters` (frontmatter properties; tantivy backend only) is a required argument — pass `[]` when you have no property filters. Supply at least one of `query` (full-text), `regex`, a non-empty `filters`, or the `modified_after`/`modified_before` time bounds. With time bounds alone, hits are ordered by recency. Paginated like list_memory_notes.",
             merge_schema(scheme, fields_schema::<RecallFields>()),
         ));
     }
@@ -2241,5 +2288,122 @@ mod tests {
     #[test]
     fn slice_lines_offset_past_eof_is_empty() {
         assert_eq!(slice_lines("a\nb\n", range(5, None)), (String::new(), 2));
+    }
+
+    /// Recursively collect every `enum` array found anywhere in a schema
+    /// fragment, mirroring the recursion shape of [`normalize_schema_object`].
+    fn collect_enums<'a>(schema: &'a Value, out: &mut Vec<&'a Vec<Value>>) {
+        let Value::Object(map) = schema else {
+            if let Value::Array(items) = schema {
+                for item in items {
+                    collect_enums(item, out);
+                }
+            }
+            return;
+        };
+        if let Some(Value::Array(values)) = map.get("enum") {
+            out.push(values);
+        }
+        if let Some(Value::Object(properties)) = map.get("properties") {
+            for value in properties.values() {
+                collect_enums(value, out);
+            }
+        }
+        if let Some(items) = map.get("items") {
+            collect_enums(items, out);
+        }
+        for key in ["anyOf", "oneOf", "allOf"] {
+            if let Some(variants) = map.get(key) {
+                collect_enums(variants, out);
+            }
+        }
+        if let Some(Value::Object(defs)) = map.get("$defs") {
+            for value in defs.values() {
+                collect_enums(value, out);
+            }
+        }
+    }
+
+    /// No tool's schema may contain a literal `null` inside an `enum` array,
+    /// at any nesting level — this is the confirmed cause of the
+    /// `evolve_core_persona` breakage against a real MCP host (a schema
+    /// enum-conversion utility stringifies `null` into the literal string
+    /// `"null"`, injecting a bogus enum value). Every optional enum-typed
+    /// field must express "no value" some other way (see `EvolveFields.which`,
+    /// which is `Option<String>`, not `Option<Which>`, specifically to avoid
+    /// this).
+    #[test]
+    fn no_tool_schema_enum_contains_null() {
+        let scheme = Scheme::parse("<team>.<agent>.<env>.<user>").unwrap();
+        for tool in build_tools(&scheme, true) {
+            let schema = Value::Object((*tool.input_schema).clone());
+            let mut enums = Vec::new();
+            collect_enums(&schema, &mut enums);
+            for values in enums {
+                assert!(
+                    !values.contains(&Value::Null),
+                    "tool {:?} has a null entry in an enum: {values:?}",
+                    tool.name
+                );
+            }
+        }
+    }
+
+    /// `true` if `key` appears anywhere in `schema`, at any nesting level,
+    /// mirroring the recursion shape of [`normalize_schema_object`].
+    fn contains_key_anywhere(schema: &Value, key: &str) -> bool {
+        match schema {
+            Value::Object(map) => {
+                if map.contains_key(key) {
+                    return true;
+                }
+                if let Some(Value::Object(properties)) = map.get("properties")
+                    && properties.values().any(|v| contains_key_anywhere(v, key))
+                {
+                    return true;
+                }
+                if let Some(items) = map.get("items")
+                    && contains_key_anywhere(items, key)
+                {
+                    return true;
+                }
+                for combinator in ["anyOf", "oneOf", "allOf"] {
+                    if let Some(variants) = map.get(combinator)
+                        && contains_key_anywhere(variants, key)
+                    {
+                        return true;
+                    }
+                }
+                if let Some(Value::Object(defs)) = map.get("$defs")
+                    && defs.values().any(|v| contains_key_anywhere(v, key))
+                {
+                    return true;
+                }
+                false
+            }
+            Value::Array(items) => items.iter().any(|item| contains_key_anywhere(item, key)),
+            _ => false,
+        }
+    }
+
+    /// No tool's schema may declare `minimum`, `maximum`, or `multipleOf` on
+    /// any numeric field, at any nesting level — Anthropic's `strict: true`
+    /// tool use rejects `minimum` on integer fields outright (confirmed
+    /// against the live API), and range enforcement has always lived in the
+    /// handlers, not the schema, so dropping these keywords loses no
+    /// validation.
+    #[test]
+    fn no_tool_schema_has_numeric_range_constraints() {
+        let scheme = Scheme::parse("<team>.<agent>.<env>.<user>").unwrap();
+        for tool in build_tools(&scheme, true) {
+            let schema = Value::Object((*tool.input_schema).clone());
+            for key in ["minimum", "maximum", "multipleOf"] {
+                assert!(
+                    !contains_key_anywhere(&schema, key),
+                    "tool {:?} has a {key:?} keyword somewhere in its schema",
+                    tool.name
+                );
+            }
+        }
     }
 }

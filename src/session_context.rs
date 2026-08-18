@@ -146,10 +146,11 @@ How the managed files are written:
 - The task heartbeat is updated through `update_task_heartbeat`, which targets
   `HEARTBEAT.md`.
 - The core root files (`PERSONA.md`, `PROMPT.md`, `RULES.md`, `USER.md`,
-  `MEMORY.md`) are changed through `evolve_core_persona` — one file via
-  `which`/`content`, or several at once via its `updates` batch form. Generic
-  `write_memory_note`/`edit_memory_note`/`delete_memory_note` may only target
-  paths under a subfolder; root-level core files are reserved for the wrappers.
+  `MEMORY.md`) are changed through `evolve_core_persona`'s `updates` array — a
+  single-file update is a one-element array, several at once is a longer one.
+  Generic `write_memory_note`/`edit_memory_note`/`delete_memory_note` may only
+  target paths under a subfolder; root-level core files are reserved for the
+  wrappers.
 
 Line caps (enforced on tool writes): `USER.md` ≤ 100 lines, `MEMORY.md` ≤ 200 lines.
 ";
@@ -377,7 +378,7 @@ fn onboarding_directive(missing: &[String]) -> String {
     format!(
         "> **Onboarding needed — these foundational files are not yet recorded: {}.** \
          Interview the user about identity, role, working style, and boundaries, then commit \
-         them in a single `evolve_core_persona` call (the `updates` batch form). Distill the \
+         them in a single `evolve_core_persona` call (one `updates` array entry per file). Distill the \
          answers into concise wording for fast comprehension by future sessions, not a verbatim \
          transcript. Do this before substantive work.",
         missing.join(", ")
