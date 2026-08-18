@@ -41,11 +41,12 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
         }
       },
       "required": [
-        "team",
         "agent",
+        "content",
         "env",
-        "user",
-        "content"
+        "team",
+        "title",
+        "user"
       ],
       "type": "object"
     }
@@ -81,11 +82,11 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
         }
       },
       "required": [
-        "team",
         "agent",
         "env",
-        "user",
-        "path"
+        "path",
+        "team",
+        "user"
       ],
       "type": "object"
     }
@@ -129,19 +130,19 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
         }
       },
       "required": [
-        "team",
         "agent",
         "env",
-        "user",
         "path",
+        "replace_string",
         "search_string",
-        "replace_string"
+        "team",
+        "user"
       ],
       "type": "object"
     }
   },
   "evolve_core_persona": {
-    "description": "Atomically replace foundational session files (persona|prompt|rules|user|memory): a single file via `which` + `content`, or several in one call via an `updates` array of 1–5 { which, content } entries (no duplicate `which`), validated as a unit before any write — supply exactly one form. When bootstrapping missing foundational files, interview the user first (identity, role, working style, boundaries), distill the answers into your own concise wording, then commit all affected files in one batch call. Enforces caps: RULES.md ≤ 40 lines, USER.md ≤ 100 lines, MEMORY.md ≤ 200 lines.",
+    "description": "Atomically replace foundational session files (persona|prompt|rules|user|memory) via the single required argument `updates`: an array of 1–5 { which, content } entries (no duplicate `which`) — a single-file update is a one-element array. Every entry is validated as a unit before any write; the response always carries `results`, one { which, bytes_written } entry per update, in request order, even for a single entry. When bootstrapping missing foundational files, interview the user first (identity, role, working style, boundaries), distill the answers into your own concise wording, then commit all affected files in one batch call. Enforces caps: RULES.md ≤ 40 lines, USER.md ≤ 100 lines, MEMORY.md ≤ 200 lines.",
     "input_schema": {
       "additionalProperties": false,
       "properties": {
@@ -149,13 +150,6 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
           "description": "Scope key 'agent' identifying the caller.",
           "minLength": 1,
           "type": "string"
-        },
-        "content": {
-          "description": "Single form: the full new contents of the selected file. `rules` content\nmust be ≤ 40 lines, `user` content ≤ 100 lines, and `memory` content\n≤ 200 lines.",
-          "type": [
-            "string",
-            "null"
-          ]
         },
         "env": {
           "description": "Scope key 'env' identifying the caller.",
@@ -168,9 +162,10 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
           "type": "string"
         },
         "updates": {
-          "description": "Batch form: 1 to 5 `{ which, content }` entries, each with the same\nsemantics as the single form; duplicate `which` values are rejected.\nEvery entry is validated — `which` domain, line caps, link expansion —\nbefore any file is written: any failure rejects the whole call leaving\nevery foundational file unchanged. Entries are applied in request order;\nthe result carries one `{ which, bytes_written }` entry per update, in\nrequest order. Each applied entry is atomic, but the batch is not\ntransactional across files: a crash mid-apply may leave a prefix of the\nentries applied.",
+          "description": "1 to 5 `{ which, content }` entries; a single-file update is a\none-element array. Duplicate `which` values are rejected. Every entry\nis validated — `which` domain, line caps, link expansion — before any\nfile is written: any failure rejects the whole call leaving every\nfoundational file unchanged. Entries are applied in request order; the\nresult carries one `{ which, bytes_written }` entry per update, in\nrequest order, even when there is only one. Each applied entry is\natomic, but the call is not transactional across files: a crash\nmid-apply may leave a prefix of the entries applied.",
           "items": {
-            "description": "One batch `evolve_core_persona` entry: a foundational file and its full new\ncontents, with the same per-entry semantics as the single form.",
+            "additionalProperties": false,
+            "description": "One `evolve_core_persona` `updates` entry: a foundational file and its full\nnew contents.",
             "properties": {
               "content": {
                 "description": "The full new contents of the selected file. `rules` content must be ≤ 40\nlines, `user` content ≤ 100 lines, and `memory` content ≤ 200 lines.",
@@ -189,41 +184,24 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
               }
             },
             "required": [
-              "which",
-              "content"
+              "content",
+              "which"
             ],
             "type": "object"
           },
-          "type": [
-            "array",
-            "null"
-          ]
+          "type": "array"
         },
         "user": {
           "description": "Scope key 'user' identifying the caller.",
           "minLength": 1,
           "type": "string"
-        },
-        "which": {
-          "description": "Single form: which foundational file to replace — one of persona, prompt,\nrules, user, memory. Requires `content`. Exactly one of the single form\n(`which` + `content`) or the batch form (`updates`) must be supplied;\nneither or both is rejected.",
-          "enum": [
-            "persona",
-            "prompt",
-            "rules",
-            "user",
-            "memory",
-            null
-          ],
-          "type": [
-            "string",
-            "null"
-          ]
         }
       },
       "required": [
-        "team",
         "agent",
         "env",
+        "team",
+        "updates",
         "user"
       ],
       "type": "object"
@@ -263,8 +241,6 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
         "limit": {
           "default": null,
           "description": "Maximum number of entries to return (default 200, maximum 1000).",
-          "format": "uint64",
-          "minimum": 0,
           "type": [
             "integer",
             "null"
@@ -306,10 +282,16 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
         }
       },
       "required": [
-        "team",
         "agent",
+        "cursor",
         "env",
-        "user"
+        "glob",
+        "limit",
+        "order",
+        "path_prefix",
+        "team",
+        "user",
+        "view"
       ],
       "type": "object"
     }
@@ -341,9 +323,9 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
         }
       },
       "required": [
-        "team",
         "agent",
         "env",
+        "team",
         "user"
       ],
       "type": "object"
@@ -373,8 +355,6 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
         },
         "limit": {
           "description": "Optional maximum number of lines to return, counted from `offset`\n(default: all remaining lines).",
-          "format": "uint64",
-          "minimum": 1,
           "type": [
             "integer",
             "null"
@@ -382,8 +362,6 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
         },
         "offset": {
           "description": "Optional 1-based line number of the first returned line (default 1).\nWhen `offset` or `limit` is supplied, the structured result additionally\ncarries `total_lines` — the line count of the full note — and an offset\npast the last line returns empty content rather than an error.",
-          "format": "uint64",
-          "minimum": 1,
           "type": [
             "integer",
             "null"
@@ -405,11 +383,14 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
         }
       },
       "required": [
-        "team",
         "agent",
+        "backlinks",
         "env",
-        "user",
-        "path"
+        "limit",
+        "offset",
+        "path",
+        "team",
+        "user"
       ],
       "type": "object"
     }
@@ -438,12 +419,11 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
                 "type": "string"
               },
               {
+                "additionalProperties": false,
                 "description": "A path with an optional line range, with the same `offset`/`limit`\nsemantics as `read_memory_note`; the entry's result additionally carries\n`total_lines`.",
                 "properties": {
                   "limit": {
                     "description": "Maximum number of lines to return (default: all remaining lines).",
-                    "format": "uint64",
-                    "minimum": 1,
                     "type": [
                       "integer",
                       "null"
@@ -451,8 +431,6 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
                   },
                   "offset": {
                     "description": "1-based line number of the first returned line.",
-                    "format": "uint64",
-                    "minimum": 1,
                     "type": [
                       "integer",
                       "null"
@@ -464,6 +442,8 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
                   }
                 },
                 "required": [
+                  "limit",
+                  "offset",
                   "path"
                 ],
                 "type": "object"
@@ -485,11 +465,11 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
         }
       },
       "required": [
-        "team",
         "agent",
         "env",
-        "user",
-        "paths"
+        "paths",
+        "team",
+        "user"
       ],
       "type": "object"
     }
@@ -525,11 +505,11 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
         }
       },
       "required": [
-        "team",
         "agent",
         "env",
-        "user",
-        "path"
+        "path",
+        "team",
+        "user"
       ],
       "type": "object"
     }
@@ -569,18 +549,18 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
         }
       },
       "required": [
-        "team",
         "agent",
         "env",
-        "user",
+        "new_path",
         "path",
-        "new_path"
+        "team",
+        "user"
       ],
       "type": "object"
     }
   },
   "update_note_properties": {
-    "description": "Merge a JSON object into a note's frontmatter atomically: each key is upserted, an explicit `null` deletes a key, and the note body is untouched. The block is created when absent, removed when the merge empties it, and re-serialized in normalized form (stable key order; comments and formatting are not preserved). `[[wikilink]]` targets in string values (including inside arrays and nested objects) are persisted in their resolvable on-disk form, exactly as a whole-file write would store them. Returns the full post-update `{ properties }` in the clean agent-facing form — what you write is what you read back.",
+    "description": "Merge a JSON object into a note's frontmatter atomically. The object is supplied as `properties_json`, a JSON-encoded string (e.g. `\"{\\\"status\\\":\\\"done\\\",\\\"priority\\\":null}\"`), since the caller's key set is arbitrary and cannot be described as a fixed schema; each decoded key is upserted, an explicit `null` deletes a key, and the note body is untouched. `properties_json` must decode to a JSON object — malformed JSON or a non-object value is rejected with `invalid_argument`. The block is created when absent, removed when the merge empties it, and re-serialized in normalized form (stable key order; comments and formatting are not preserved). `[[wikilink]]` targets in string values (including inside arrays and nested objects) are persisted in their resolvable on-disk form, exactly as a whole-file write would store them. Returns the full post-update `{ properties }` (a JSON object, not JSON-encoded) in the clean agent-facing form — what you write is what you read back.",
     "input_schema": {
       "additionalProperties": false,
       "properties": {
@@ -598,10 +578,9 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
           "description": "The virtual path of the note, relative to the vault root. The note must\nalready exist.",
           "type": "string"
         },
-        "properties": {
-          "additionalProperties": true,
-          "description": "The properties to merge into the note's frontmatter. Each key is upserted\nwith its JSON value (strings, numbers, booleans, arrays, and nested\nobjects round-trip); a key supplied with an explicit `null` is deleted.",
-          "type": "object"
+        "properties_json": {
+          "description": "The properties to merge into the note's frontmatter, JSON-encoded as a\nstring (e.g. `\"{\\\"status\\\":\\\"done\\\",\\\"priority\\\":null}\"`) — the caller's\nkey set is arbitrary, which a closed JSON Schema object cannot describe,\nso it is carried as an opaque string instead of a nested object. Each\ndecoded key is upserted with its JSON value (strings, numbers, booleans,\narrays, and nested objects round-trip); a key supplied with an explicit\n`null` is deleted. The string must decode to a JSON object; malformed\nJSON or a non-object top-level value is rejected with `invalid_argument`.",
+          "type": "string"
         },
         "team": {
           "description": "Scope key 'team' identifying the caller.",
@@ -615,12 +594,12 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
         }
       },
       "required": [
-        "team",
         "agent",
         "env",
-        "user",
         "path",
-        "properties"
+        "properties_json",
+        "team",
+        "user"
       ],
       "type": "object"
     }
@@ -656,11 +635,11 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
         }
       },
       "required": [
-        "team",
         "agent",
+        "content",
         "env",
-        "user",
-        "content"
+        "team",
+        "user"
       ],
       "type": "object"
     }
@@ -707,12 +686,13 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
         }
       },
       "required": [
-        "team",
         "agent",
+        "append",
+        "content",
         "env",
-        "user",
         "path",
-        "content"
+        "team",
+        "user"
       ],
       "type": "object"
     }
@@ -735,6 +715,7 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
         "notes": {
           "description": "1 to 20 entries, each `{ path, content, append? }` with the same\nper-entry semantics as `write_memory_note`. Every entry is fully\nvalidated (path, policy, visibility, link expansion) before any file is\ntouched: any failure rejects the whole call with no writes, as do an\nempty or oversized array, a malformed entry, and two entries resolving\nto the same virtual path. A `[[wikilink]]` may target a note created by\nanother entry of the same call — resolution is order-independent. The\nresult carries one `{ path, bytes_written }` entry per note, in request\norder. Each applied entry is atomic and indexed for recall\nsynchronously, but the batch is not transactional across entries: a\ncrash mid-apply may leave a prefix of the batch applied.",
           "items": {
+            "additionalProperties": false,
             "description": "One `write_memory_notes` entry: a note to write, with the same per-entry\nsemantics as `write_memory_note`.",
             "properties": {
               "append": {
@@ -754,8 +735,9 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
               }
             },
             "required": [
-              "path",
-              "content"
+              "append",
+              "content",
+              "path"
             ],
             "type": "object"
           },
@@ -773,11 +755,11 @@ expression: "schemas_for(\"<team>.<agent>.<env>.<user>\")"
         }
       },
       "required": [
-        "team",
         "agent",
         "env",
-        "user",
-        "notes"
+        "notes",
+        "team",
+        "user"
       ],
       "type": "object"
     }

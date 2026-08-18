@@ -3,7 +3,7 @@ source: tests/schema_snapshots.rs
 expression: "recall_schema_for(\"<agent>.<user>\")"
 ---
 {
-  "description": "Search memory notes by content within the caller's visible set. Returns ranked hits as { path, score (0-1), snippets, modified_at }. Supply at least one of `query` (full-text), `regex`, `filters` (frontmatter properties; tantivy backend only), or the `modified_after`/`modified_before` time bounds. With time bounds alone, hits are ordered by recency. Paginated like list_memory_notes.",
+  "description": "Search memory notes by content within the caller's visible set. Returns ranked hits as { path, score (0-1), snippets, modified_at }. `filters` (frontmatter properties; tantivy backend only) is a required argument — pass `[]` when you have no property filters. Supply at least one of `query` (full-text), `regex`, a non-empty `filters`, or the `modified_after`/`modified_before` time bounds. With time bounds alone, hits are ordered by recency. Paginated like list_memory_notes.",
   "input_schema": {
     "additionalProperties": false,
     "properties": {
@@ -20,8 +20,9 @@ expression: "recall_schema_for(\"<agent>.<user>\")"
         ]
       },
       "filters": {
-        "description": "Frontmatter property filters. Requires the tantivy backend; rejected with\n`unsupported` on the simple backend.",
+        "description": "Frontmatter property filters. Requires the tantivy backend; rejected with\n`unsupported` on the simple backend. An empty array means \"no property\nfilters\" — the same as omitting this argument.",
         "items": {
+          "additionalProperties": false,
           "description": "One frontmatter property predicate (tantivy backend only).",
           "properties": {
             "key": {
@@ -51,19 +52,15 @@ expression: "recall_schema_for(\"<agent>.<user>\")"
           },
           "required": [
             "key",
-            "op"
+            "op",
+            "value"
           ],
           "type": "object"
         },
-        "type": [
-          "array",
-          "null"
-        ]
+        "type": "array"
       },
       "limit": {
         "description": "Maximum number of hits to return (default 200, maximum 1000).",
-        "format": "uint64",
-        "minimum": 0,
         "type": [
           "integer",
           "null"
@@ -112,6 +109,14 @@ expression: "recall_schema_for(\"<agent>.<user>\")"
     },
     "required": [
       "agent",
+      "cursor",
+      "filters",
+      "limit",
+      "modified_after",
+      "modified_before",
+      "path_prefix",
+      "query",
+      "regex",
       "user"
     ],
     "type": "object"
