@@ -28,7 +28,8 @@ use crate::storage::{LinkEntry, LinkIndex};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LinkKind {
     /// `[[target]]`, `[[target|alias]]`, `[[target#heading]]`, or `![[target]]`.
-    /// The target is a basename (no `.md` extension).
+    /// The target is a basename; a literal `.md` extension may be present and
+    /// is stripped during resolution, Obsidian-style.
     Wikilink,
     /// `[text](path.md)` — the target is a relative path carrying `.md`.
     Markdown,
@@ -356,9 +357,12 @@ pub(crate) fn resolve_target<'a>(
     kind: LinkKind,
     target: &str,
 ) -> Option<&'a LinkEntry> {
+    // A wikilink target may carry a literal `.md` (Obsidian treats `[[file]]`
+    // and `[[file.md]]` as equivalent); strip it before matching, exactly like
+    // the markdown-link arm, whose targets always carry the extension.
     let clean = match kind {
         LinkKind::Markdown => target.strip_suffix(".md").unwrap_or(target),
-        LinkKind::Wikilink => target,
+        LinkKind::Wikilink => target.strip_suffix(".md").unwrap_or(target),
     };
     let basename = last_segment(clean);
     let candidates = index.entries_for_basename(basename);
@@ -634,6 +638,22 @@ mod tests {
     fn resolve_dangling_is_none() {
         let idx = index(&[("Agents/topics/rust.md", Region::InsideAgentsFolder)]);
         assert!(resolve_target(&idx, LinkKind::Wikilink, "missing").is_none());
+        // Stripping `.md` must not make an unresolvable target resolve.
+        assert!(resolve_target(&idx, LinkKind::Wikilink, "missing.md").is_none());
+    }
+
+    /// Obsidian treats `[[file]]` and `[[file.md]]` as equivalent: a wikilink
+    /// target carrying a literal `.md` resolves to the same entry.
+    #[test]
+    fn resolve_wikilink_target_with_md_extension_matches_extensionless() {
+        let idx = index(&[("Agents/topics/rust.md", Region::InsideAgentsFolder)]);
+        let bare = resolve_target(&idx, LinkKind::Wikilink, "rust").unwrap();
+        let suffixed = resolve_target(&idx, LinkKind::Wikilink, "rust.md").unwrap();
+        assert_eq!(bare, suffixed);
+        assert_eq!(suffixed.clean_path, "Agents/topics/rust");
+        // A qualified `.md`-suffixed target resolves the same way.
+        let qualified = resolve_target(&idx, LinkKind::Wikilink, "topics/rust.md").unwrap();
+        assert_eq!(qualified, bare);
     }
 
     // --- expand / strip round-trip ---
@@ -654,6 +674,27 @@ mod tests {
         assert_eq!(out, "see [[rust.jarvis.tony]]");
         // Round-trip: strip recovers the clean name.
         assert_eq!(strip_links(&out, "jarvis.tony", &r), "see [[rust]]");
+    }
+
+    /// A `.md`-suffixed wikilink target expands to the identical suffixed,
+    /// extension-less persisted form as the bare spelling of the same target.
+    #[test]
+    fn expand_wikilink_with_md_extension_converges_to_extensionless_form() {
+        let tmp = assert_fs::TempDir::new().unwrap();
+        let r = resolver(tmp.path());
+        let idx = index(&[("Agents/topics/rust.md", Region::InsideAgentsFolder)]);
+        let out = expand_links(
+            "a [[rust|the Rust note]] b [[rust.md|the Rust note]]",
+            "jarvis.tony",
+            Region::InsideAgentsFolder,
+            &r,
+            &idx,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "a [[rust.jarvis.tony|the Rust note]] b [[rust.jarvis.tony|the Rust note]]"
+        );
     }
 
     #[test]
@@ -686,6 +727,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, "[[not-yet]] and [x](future.md)");
+        // A `.md`-suffixed wikilink with no matching note dangles verbatim too.
+        let out = expand_links(
+            "[[ghost.md]]",
+            "jarvis.tony",
+            Region::InsideAgentsFolder,
+            &r,
+            &idx,
+        )
+        .unwrap();
+        assert_eq!(out, "[[ghost.md]]");
     }
 
     #[test]
@@ -753,6 +804,29 @@ mod tests {
         assert!(expanded.contains("(Agents/jarvis.tony/topics/guide.jarvis.tony.md)"));
         // ...but stripping it recovers exactly the clean content.
         assert_eq!(strip_links(&expanded, "jarvis.tony", &r), clean);
+
+        // `.md`-suffixed wikilink spellings persist in the same normalized
+        // form, so reading them back yields the clean extension-less spelling
+        // rather than the original bytes.
+        let md_suffixed = "plain [[rust.md]], aliased [[rust.md|R]], \
+                           heading [[rust.md#install]], embed ![[guide.md]].";
+        let expanded = expand_links(
+            md_suffixed,
+            "jarvis.tony",
+            Region::InsideAgentsFolder,
+            &r,
+            &idx,
+        )
+        .unwrap();
+        assert_eq!(
+            expanded,
+            "plain [[rust.jarvis.tony]], aliased [[rust.jarvis.tony|R]], \
+             heading [[rust.jarvis.tony#install]], embed ![[guide.jarvis.tony]]."
+        );
+        assert_eq!(
+            strip_links(&expanded, "jarvis.tony", &r),
+            "plain [[rust]], aliased [[rust|R]], heading [[rust#install]], embed ![[guide]]."
+        );
     }
 
     // --- references_to (backlink reverse resolution) ---
@@ -791,6 +865,12 @@ mod tests {
             "![[rust.jarvis.tony]]",
             // The stored own-scope markdown form: vault-root-relative physical path.
             "[doc](Agents/jarvis.tony/topics/rust.jarvis.tony.md)",
+            // `.md`-suffixed wikilink spellings (written before the resolver fix
+            // or authored externally) resolve to the same entry.
+            "[[rust.md]]",
+            "[[rust.md#install]]",
+            "[[rust.md|the Rust note]]",
+            "![[rust.md]]",
         ];
         for content in stored_forms {
             assert!(
@@ -881,6 +961,32 @@ mod tests {
         let dest = entry("Agents/topics/rust-lang", Region::InsideAgentsFolder);
         let (out, n) = retarget_links(
             "[[rust.jarvis.tony#install|the note]] and ![[rust.jarvis.tony]]",
+            "Agents/topics/rust",
+            &dest,
+            "jarvis.tony",
+            Region::InsideAgentsFolder,
+            &r,
+            &idx,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "[[rust-lang.jarvis.tony#install|the note]] and ![[rust-lang.jarvis.tony]]"
+        );
+        assert_eq!(n, 2);
+    }
+
+    /// A referrer's `.md`-suffixed wikilink resolves to the source and is
+    /// retargeted on rename identically to the extension-less spelling, with
+    /// decorations preserved and the extension dropped from the rewritten form.
+    #[test]
+    fn retarget_rewrites_md_suffixed_wikilink_like_extensionless() {
+        let tmp = assert_fs::TempDir::new().unwrap();
+        let r = resolver(tmp.path());
+        let idx = index(&[("Agents/topics/rust.md", Region::InsideAgentsFolder)]);
+        let dest = entry("Agents/topics/rust-lang", Region::InsideAgentsFolder);
+        let (out, n) = retarget_links(
+            "[[rust.md#install|the note]] and ![[rust.md]]",
             "Agents/topics/rust",
             &dest,
             "jarvis.tony",

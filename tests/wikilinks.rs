@@ -86,6 +86,34 @@ fn write_expands_own_scope_link_on_disk_and_read_strips_it() {
     assert_eq!(read_content(&tb, "Agents/notes/index.md"), "see [[rust]]");
 }
 
+/// A `.md`-suffixed wikilink target resolves and persists exactly like the
+/// extension-less spelling: suffixed on disk, clean on read.
+#[test]
+fn md_suffixed_wikilink_persists_extensionless_and_reads_back_clean() {
+    let tmp = TempDir::new().unwrap();
+    let tb = toolbox(&tmp, Policy::Namespaced);
+    seed_rust(&tb);
+    call(
+        &tb,
+        "write_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/notes/index.md","content":"see [[rust.md|the Rust note]]"}),
+    )
+    .unwrap();
+
+    // On disk the link carries the caller's suffix and drops the `.md`.
+    let physical = tmp
+        .path()
+        .join("Agents/jarvis.tony/notes/index.jarvis.tony.md");
+    let raw = std::fs::read_to_string(&physical).unwrap();
+    assert_eq!(raw, "see [[rust.jarvis.tony|the Rust note]]");
+
+    // Read presents the clean extension-less form.
+    assert_eq!(
+        read_content(&tb, "Agents/notes/index.md"),
+        "see [[rust|the Rust note]]"
+    );
+}
+
 #[test]
 fn edit_search_matches_clean_link_form() {
     let tmp = TempDir::new().unwrap();
