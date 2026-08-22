@@ -163,6 +163,13 @@ pub(crate) trait BackendIndex: Send {
     /// Persist a batch of upserts/removals. A no-op for backends that mutate in
     /// place; the tantivy backend commits and reloads its reader here.
     fn flush(&mut self) {}
+    /// Downcast seam for tests that inspect a concrete backend (e.g. the tantivy
+    /// commit counter). `None` for backends with nothing to inspect.
+    #[cfg(test)]
+    #[cfg_attr(not(feature = "recall-tantivy"), allow(dead_code))]
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
 }
 
 // --- per-region index state ---
@@ -181,6 +188,40 @@ enum IndexRegion {
     Scoped(String),
     /// The single shared-region index outside the agents folder.
     Shared,
+}
+
+/// The set of indexes a caller has upserted into but not yet committed: at most
+/// one scope's own index plus the shared index. A multi-write operation (e.g.
+/// `rename_memory_note`) accumulates the [`Touched`] returned by each
+/// [`RecallEngine::upsert_write`] call and flushes the whole set once via
+/// [`RecallEngine::commit_touched`], paying one commit per affected index for
+/// the entire operation instead of one per file.
+#[derive(Debug, Default)]
+pub struct Touched {
+    scope: Option<String>,
+    shared: bool,
+}
+
+impl Touched {
+    /// Record the index a write landed in.
+    fn insert(&mut self, region: &IndexRegion) {
+        match region {
+            IndexRegion::Scoped(scope) => self.scope = Some(scope.clone()),
+            IndexRegion::Shared => self.shared = true,
+        }
+    }
+
+    /// Fold another set into this one.
+    pub fn merge(&mut self, other: Touched) {
+        if other.scope.is_some() {
+            self.scope = other.scope;
+        }
+        self.shared |= other.shared;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.scope.is_none() && !self.shared
+    }
 }
 
 /// One resident in-memory index plus its reconciliation bookkeeping.
@@ -392,21 +433,67 @@ impl RecallEngine {
         *guard = Some(watcher);
     }
 
-    /// Incrementally update the index after the server's own write to `physical`.
-    /// A no-op when the owning index is not currently resident (it will pick the
-    /// change up on its next build).
+    /// Incrementally update the index after the server's own write to `physical`:
+    /// upsert and commit the owning index in one go. A no-op when the owning
+    /// index is not currently resident (it will pick the change up on its next
+    /// build). Single-write callers keep this commit-per-call behavior; a
+    /// multi-write operation uses [`RecallEngine::upsert_write`] /
+    /// [`RecallEngine::commit_touched`] directly to commit once per batch.
     pub fn on_write(&self, rendered_scope: &str, region: Region, physical: &PhysicalPath) {
+        let touched = self.upsert_write(rendered_scope, region, physical);
+        self.commit_touched(&touched);
+    }
+
+    /// Upsert the server's own write into the owning index *without* committing,
+    /// returning which index the write landed in. Returns an empty set when the
+    /// engine is not built yet or the owning index is not resident (mirroring
+    /// [`RecallEngine::on_write`]'s early returns — the next build or reconcile
+    /// picks the change up). The lock is held only for the in-memory upsert.
+    pub(crate) fn upsert_write(
+        &self,
+        rendered_scope: &str,
+        region: Region,
+        physical: &PhysicalPath,
+    ) -> Touched {
         let mut state = self.state.lock().expect("recall state poisoned");
         if !state.built {
             // Not built yet: the eager build will read the new content.
-            return;
+            return Touched::default();
         }
         let idx = match region {
             Region::OutsideAgentsFolder => state.shared.as_mut(),
             Region::InsideAgentsFolder => state.scopes.get_mut(rendered_scope),
         };
-        if let Some(idx) = idx {
-            self.apply_path(idx, physical);
+        match idx {
+            Some(idx) => {
+                apply_path_with(idx, physical, &self.storage, &self.ingested, false);
+                let mut touched = Touched::default();
+                touched.insert(&idx.region);
+                touched
+            }
+            None => Touched::default(),
+        }
+    }
+
+    /// Commit exactly the indexes named in `touched` — the caller's own-scope
+    /// index and/or the shared index — each at most once, reacquiring the state
+    /// lock only for this call. An index that was evicted between the upsert and
+    /// this commit is skipped: eviction flushes before dropping, so nothing is
+    /// lost.
+    pub(crate) fn commit_touched(&self, touched: &Touched) {
+        if touched.is_empty() {
+            return;
+        }
+        let mut state = self.state.lock().expect("recall state poisoned");
+        if let Some(scope) = touched.scope.as_deref()
+            && let Some(idx) = state.scopes.get_mut(scope)
+        {
+            idx.backend.flush();
+        }
+        if touched.shared
+            && let Some(idx) = state.shared.as_mut()
+        {
+            idx.backend.flush();
         }
     }
 
@@ -649,11 +736,6 @@ impl RecallEngine {
         reconcile_with(idx, &self.storage, &self.ingested);
     }
 
-    /// Re-read and upsert a single physical path into `idx` (or remove it if gone).
-    fn apply_path(&self, idx: &mut RegionIndex, physical: &PhysicalPath) {
-        apply_path_with(idx, physical, &self.storage, &self.ingested);
-    }
-
     /// Build a scope index on demand when it was never built or was evicted.
     fn ensure_scope_resident(&self, state: &mut EngineState, rendered_scope: &str) {
         if state.scopes.contains_key(rendered_scope) {
@@ -783,12 +865,16 @@ fn reconcile_with(idx: &mut RegionIndex, storage: &Storage, ingested: &AtomicU64
     idx.last_reconcile = Some(Instant::now());
 }
 
-/// Upsert or remove a single physical path (used by the synchronous own-write path).
+/// Upsert or remove a single physical path (used by the synchronous own-write
+/// path). When `flush` is false the backend's changes stay uncommitted — the
+/// caller is a multi-write operation that commits once via
+/// [`RecallEngine::commit_touched`].
 fn apply_path_with(
     idx: &mut RegionIndex,
     physical: &PhysicalPath,
     storage: &Storage,
     ingested: &AtomicU64,
+    flush: bool,
 ) {
     let key = physical.as_path().to_path_buf();
     match std::fs::metadata(physical.as_path()) {
@@ -821,7 +907,9 @@ fn apply_path_with(
             }
         }
     }
-    idx.backend.flush();
+    if flush {
+        idx.backend.flush();
+    }
 }
 
 /// Derive the clean virtual path of a physical file for the given index region.
@@ -1468,6 +1556,104 @@ mod tests {
             "scope ident matched as content: {:?}",
             results.hits
         );
+    }
+
+    #[cfg(feature = "recall-tantivy")]
+    #[test]
+    fn batch_upserts_commit_once_per_touched_index() {
+        // A rename-shaped batch: five rewritten referrers in the caller's scope
+        // plus one in the shared region, all upserted without committing, then
+        // committed once per touched index — not once per file.
+        let tmp = TempDir::new().unwrap();
+        tmp.child("Agents/jarvis.tony/topics/rust.jarvis.tony.md")
+            .write_str("the zyzzyva fact")
+            .unwrap();
+        let resolver = PathResolver::new(
+            tmp.path().canonicalize().unwrap(),
+            camino::Utf8PathBuf::from("Agents"),
+            Scheme::parse("<agent>.<user>").unwrap(),
+        );
+        let storage = Arc::new(Storage::new(resolver, true, false, &[]));
+        let config = RecallConfig {
+            backend: RecallBackendKind::Tantivy,
+            watch_debounce: std::time::Duration::from_millis(0),
+            regex_scan_byte_cap: usize::MAX,
+            max_resident_scopes: 256,
+            freshness: std::time::Duration::from_secs(3600),
+            index_dir: None,
+        };
+        let engine = RecallEngine::new(storage, config).unwrap();
+        engine.warm();
+
+        // Per-index commit counts, read through the tantivy backend's test seam.
+        let flush_count = |scope: Option<&str>| -> u64 {
+            let state = engine.state.lock().unwrap();
+            let idx = match scope {
+                Some(s) => state.scopes.get(s),
+                None => state.shared.as_ref(),
+            };
+            idx.and_then(|i| i.backend.as_any())
+                .and_then(|a| a.downcast_ref::<tantivy::TantivyIndex>())
+                .map(|t| t.flush_count)
+                .unwrap_or(0)
+        };
+        let scope_commits = flush_count(Some("jarvis.tony"));
+        let shared_commits = flush_count(None);
+
+        // Each file is written to disk, then upserted — no commit may happen
+        // until the batch's single commit_touched.
+        let resolver = engine.storage.resolver();
+        let mut touched = Touched::default();
+        for i in 0..5 {
+            let vpath = crate::path::VirtualPath::new(&format!("Agents/notes/r{i}.md")).unwrap();
+            let physical = resolver.resolve("jarvis.tony", &vpath).unwrap();
+            tmp.child(format!("Agents/jarvis.tony/notes/r{i}.jarvis.tony.md"))
+                .write_str(&format!("rewritten referrer {i} zyzzyva"))
+                .unwrap();
+            touched.merge(engine.upsert_write(
+                "jarvis.tony",
+                Region::InsideAgentsFolder,
+                &physical,
+            ));
+        }
+        let shared_vpath = crate::path::VirtualPath::new("Actions/shared-ref.md").unwrap();
+        let shared_physical = resolver.resolve("jarvis.tony", &shared_vpath).unwrap();
+        tmp.child("Actions/shared-ref.md")
+            .write_str("shared referrer zyzzyva")
+            .unwrap();
+        touched.merge(engine.upsert_write(
+            "jarvis.tony",
+            Region::OutsideAgentsFolder,
+            &shared_physical,
+        ));
+
+        assert_eq!(
+            flush_count(Some("jarvis.tony")),
+            scope_commits,
+            "upsert_write must not commit"
+        );
+        assert_eq!(
+            flush_count(None),
+            shared_commits,
+            "upsert_write must not commit"
+        );
+
+        engine.commit_touched(&touched);
+
+        // One commit per touched index for the whole batch.
+        assert_eq!(flush_count(Some("jarvis.tony")), scope_commits + 1);
+        assert_eq!(flush_count(None), shared_commits + 1);
+
+        // And the whole batch is visible to recall immediately after the commit.
+        let results = engine
+            .recall("jarvis.tony", BOTH, &query("zyzzyva"))
+            .unwrap();
+        let paths: Vec<&str> = results.hits.iter().map(|h| h.path.as_str()).collect();
+        for i in 0..5 {
+            let want = format!("Agents/notes/r{i}.md");
+            assert!(paths.contains(&want.as_str()), "missing {want}");
+        }
+        assert!(paths.contains(&"Actions/shared-ref.md"));
     }
 
     // --- persistent index (MUNINN_RECALL_INDEX_DIR) ---

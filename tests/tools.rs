@@ -67,6 +67,11 @@ fn frozen_recall_toolbox(tmp: &TempDir) -> Toolbox {
 
 /// [`frozen_recall_toolbox`] with a configurable backend.
 fn frozen_toolbox(tmp: &TempDir, backend: RecallBackendKind) -> Toolbox {
+    frozen_toolbox_policy(tmp, backend, Policy::Namespaced)
+}
+
+/// [`frozen_recall_toolbox`] with a configurable backend and write policy.
+fn frozen_toolbox_policy(tmp: &TempDir, backend: RecallBackendKind, policy: Policy) -> Toolbox {
     let mk = || {
         PathResolver::new(
             tmp.path().canonicalize().unwrap(),
@@ -87,7 +92,7 @@ fn frozen_toolbox(tmp: &TempDir, backend: RecallBackendKind) -> Toolbox {
         RecallEngine::new(Arc::new(Storage::new(mk(), true, false, &[])), config).map(Arc::new);
     Toolbox::new(
         storage,
-        Policy::Namespaced,
+        policy,
         Tz::UTC,
         tmp.path().join("AGENT_SESSION_CONTEXT.md"),
         tmp.path().join("AGENT_SESSION_BOOTSTRAP.md"),
@@ -1863,6 +1868,189 @@ fn rename_recall_hits_new_path_only_without_watcher() {
         json!({"agent":"jarvis","user":"tony","query":"zyzzyva"}),
     ));
     assert_eq!(hit_paths(&after), vec!["Agents/topics/rust-lang.md"]);
+}
+
+#[test]
+fn rename_recall_reflects_every_rewritten_referrer_immediately() {
+    let tmp = TempDir::new().unwrap();
+    // Readwrite, so the rename spans the caller's scope and the shared region:
+    // a shared note is renamed while referrers live in both regions (shared
+    // notes cannot link into a scope, but scoped notes can link out).
+    let tb = frozen_toolbox_policy(&tmp, RecallBackendKind::Simple, Policy::Readwrite);
+    for (path, content) in [
+        ("Actions/release.md", "the zyzzyva release"),
+        ("Agents/notes/a.md", "see [[release]]"),
+        ("Agents/notes/b.md", "again [[release]]"),
+        ("Agents/diary/c.md", "dear diary, [[release]]"),
+        ("Actions/index.md", "shared sees [[release]]"),
+    ] {
+        call(
+            &tb,
+            "write_memory_note",
+            json!({"agent":"jarvis","user":"tony","path":path,"content":content}),
+        )
+        .unwrap();
+    }
+
+    let hit_paths = |body: &Value| -> Vec<String> {
+        body["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["path"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // Build the index before the rename.
+    let before = structured(call(
+        &tb,
+        "recall_memory_notes",
+        json!({"agent":"jarvis","user":"tony","query":"zyzzyva"}),
+    ));
+    assert_eq!(hit_paths(&before), vec!["Actions/release.md"]);
+
+    let out = structured(call(
+        &tb,
+        "rename_memory_note",
+        json!({"agent":"jarvis","user":"tony",
+               "path":"Actions/release.md","new_path":"Actions/launch.md"}),
+    ));
+    assert_eq!(out["notes_rewritten"], 4);
+
+    // The renamed note is findable at its new path, and only there.
+    let after = structured(call(
+        &tb,
+        "recall_memory_notes",
+        json!({"agent":"jarvis","user":"tony","query":"zyzzyva"}),
+    ));
+    assert_eq!(hit_paths(&after), vec!["Actions/launch.md"]);
+
+    // Every rewritten referrer — own scope and shared alike — is indexed at its
+    // new link target, and no stale link to the old name survives anywhere.
+    let new_links = structured(call(
+        &tb,
+        "recall_memory_notes",
+        json!({"agent":"jarvis","user":"tony","regex":r"\[\[launch\]\]"}),
+    ));
+    let mut paths = hit_paths(&new_links);
+    paths.sort();
+    assert_eq!(
+        paths,
+        vec![
+            "Actions/index.md",
+            "Agents/diary/c.md",
+            "Agents/notes/a.md",
+            "Agents/notes/b.md"
+        ]
+    );
+    let old_links = structured(call(
+        &tb,
+        "recall_memory_notes",
+        json!({"agent":"jarvis","user":"tony","regex":r"\[\[release\]\]"}),
+    ));
+    assert!(hit_paths(&old_links).is_empty());
+}
+
+#[test]
+fn rename_mid_loop_write_failure_leaves_recall_consistent_with_disk() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let tb = frozen_recall_toolbox(&tmp);
+    for (path, content) in [
+        ("Agents/topics/rust.md", "the zyzzyva fact"),
+        ("Agents/notes/a-first.md", "see [[rust]]"),
+        ("Agents/notes/mid/blocked.md", "see [[rust]]"),
+        ("Agents/notes/z-last.md", "see [[rust]]"),
+    ] {
+        call(
+            &tb,
+            "write_memory_note",
+            json!({"agent":"jarvis","user":"tony","path":path,"content":content}),
+        )
+        .unwrap();
+    }
+
+    let hit_paths = |body: &Value| -> Vec<String> {
+        body["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["path"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // Build the index before the rename.
+    let before = structured(call(
+        &tb,
+        "recall_memory_notes",
+        json!({"agent":"jarvis","user":"tony","query":"zyzzyva"}),
+    ));
+    assert_eq!(hit_paths(&before), vec!["Agents/topics/rust.md"]);
+
+    // Make one referrer's directory unwritable so its Phase-2 write fails after
+    // the destination and an earlier referrer have already landed on disk.
+    let mid_dir = tmp.path().join("Agents/jarvis.tony/notes/mid");
+    std::fs::set_permissions(&mid_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let res = call(
+        &tb,
+        "rename_memory_note",
+        json!({"agent":"jarvis","user":"tony",
+               "path":"Agents/topics/rust.md","new_path":"Agents/topics/rust-lang.md"}),
+    );
+    // Restore writability so the temp dir can be cleaned up on drop.
+    std::fs::set_permissions(&mid_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_code(res, "io");
+
+    // Disk truth: the destination and the first referrer landed; the blocked
+    // referrer and everything after it were never written; the source was
+    // never deleted.
+    assert_eq!(
+        read_clean(&tb, "Agents/topics/rust-lang.md"),
+        "the zyzzyva fact"
+    );
+    assert_eq!(read_clean(&tb, "Agents/topics/rust.md"), "the zyzzyva fact");
+    assert_eq!(
+        read_clean(&tb, "Agents/notes/a-first.md"),
+        "see [[rust-lang]]"
+    );
+    assert_eq!(
+        read_clean(&tb, "Agents/notes/mid/blocked.md"),
+        "see [[rust]]"
+    );
+    assert_eq!(read_clean(&tb, "Agents/notes/z-last.md"), "see [[rust]]");
+
+    // The frozen index can only reflect the guard's commit: exactly the files
+    // that reached disk before the failure — no phantom entry for the blocked
+    // referrer's rewrite, no missing entry for the writes that landed.
+    let renamed = structured(call(
+        &tb,
+        "recall_memory_notes",
+        json!({"agent":"jarvis","user":"tony","query":"zyzzyva"}),
+    ));
+    let mut paths = hit_paths(&renamed);
+    paths.sort();
+    assert_eq!(
+        paths,
+        vec!["Agents/topics/rust-lang.md", "Agents/topics/rust.md"]
+    );
+    let new_links = structured(call(
+        &tb,
+        "recall_memory_notes",
+        json!({"agent":"jarvis","user":"tony","regex":r"\[\[rust-lang\]\]"}),
+    ));
+    assert_eq!(hit_paths(&new_links), vec!["Agents/notes/a-first.md"]);
+    let old_links = structured(call(
+        &tb,
+        "recall_memory_notes",
+        json!({"agent":"jarvis","user":"tony","regex":r"\[\[rust\]\]"}),
+    ));
+    let mut paths = hit_paths(&old_links);
+    paths.sort();
+    assert_eq!(
+        paths,
+        vec!["Agents/notes/mid/blocked.md", "Agents/notes/z-last.md"]
+    );
 }
 
 // --- write_memory_note ---

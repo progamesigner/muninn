@@ -90,6 +90,10 @@ pub(crate) struct TantivyIndex {
     writer: IndexWriter,
     reader: IndexReader,
     fields: Fields,
+    /// Test seam: how many times `flush` has committed this index, so a
+    /// batching test can assert one commit per touched index per operation.
+    #[cfg(test)]
+    pub(crate) flush_count: u64,
 }
 
 impl TantivyIndex {
@@ -160,6 +164,8 @@ impl TantivyIndex {
             writer,
             reader,
             fields,
+            #[cfg(test)]
+            flush_count: 0,
         })
     }
 
@@ -292,9 +298,18 @@ impl BackendIndex for TantivyIndex {
     }
 
     fn flush(&mut self) {
+        #[cfg(test)]
+        {
+            self.flush_count += 1;
+        }
         if self.writer.commit().is_ok() {
             let _ = self.reader.reload();
         }
+    }
+
+    #[cfg(test)]
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
     }
 
     fn query(&self, compiled: &CompiledQuery, byte_cap: usize) -> ScanResult {

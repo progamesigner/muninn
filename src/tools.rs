@@ -26,7 +26,7 @@ use crate::config::Grant;
 use crate::error::MuninnError;
 use crate::path::{PhysicalPath, VirtualPath};
 use crate::policy::{Policy, PolicyError, Region};
-use crate::recall::{FilterOp, PropertyFilter, RecallEngine, RecallQuery};
+use crate::recall::{FilterOp, PropertyFilter, RecallEngine, RecallQuery, Touched};
 use crate::scheme::Scheme;
 use crate::storage::{Cursor, LinkEntry, Storage};
 
@@ -505,7 +505,45 @@ impl Toolbox {
             engine.on_write(scope, region, physical);
         }
     }
+}
 
+/// Accumulates the recall indexes a multi-write operation has upserted into and
+/// commits them exactly once on drop. Every exit path from the mutation phase —
+/// including a mid-loop `?` early return — leaves each touched index reflecting
+/// exactly the writes that reached disk before the failure, and committing at
+/// most once per affected index for the whole operation.
+struct RecallCommitGuard {
+    recall: Option<Arc<RecallEngine>>,
+    touched: Touched,
+}
+
+impl RecallCommitGuard {
+    fn new(recall: Option<Arc<RecallEngine>>) -> Self {
+        Self {
+            recall,
+            touched: Touched::default(),
+        }
+    }
+
+    /// Upsert one just-written path into its owning index without committing;
+    /// the commit happens once, on drop. A no-op when recall is disabled.
+    fn upsert(&mut self, scope: &str, region: Region, physical: &PhysicalPath) {
+        if let Some(engine) = &self.recall {
+            self.touched
+                .merge(engine.upsert_write(scope, region, physical));
+        }
+    }
+}
+
+impl Drop for RecallCommitGuard {
+    fn drop(&mut self) {
+        if let Some(engine) = &self.recall {
+            engine.commit_touched(&self.touched);
+        }
+    }
+}
+
+impl Toolbox {
     // --- scope + argument helpers ---
 
     fn scheme(&self) -> &Scheme {
@@ -1316,16 +1354,22 @@ impl Toolbox {
         }
 
         // --- Phase 2: mutate. Destination first, source last, so a crash
-        // mid-flight leaves every link resolvable to at least one copy. ---
+        // mid-flight leaves every link resolvable to at least one copy. Each
+        // write is upserted into the recall index as it lands on disk; the
+        // guard commits each touched index exactly once on every exit path,
+        // including a mid-loop `write_atomic`/`delete` failure, so the index
+        // never trails disk truth further than the not-yet-written files. ---
+        let mut recall_guard = RecallCommitGuard::new(self.recall.clone());
         self.storage.write_atomic(&dest_physical, &dest_content)?;
-        self.recall_on_write(&scope, dest_region, &dest_physical);
+        recall_guard.upsert(&scope, dest_region, &dest_physical);
         let notes_rewritten = rewrites.len();
         for (r_region, r_physical, rewritten) in rewrites {
             self.storage.write_atomic(&r_physical, &rewritten)?;
-            self.recall_on_write(&scope, r_region, &r_physical);
+            recall_guard.upsert(&scope, r_region, &r_physical);
         }
         self.storage.delete(&src_physical)?;
-        self.recall_on_write(&scope, src_region, &src_physical);
+        recall_guard.upsert(&scope, src_region, &src_physical);
+        drop(recall_guard);
 
         Ok(ok_json(json!({
             "renamed": true,
