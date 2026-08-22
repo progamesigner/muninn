@@ -190,7 +190,13 @@ index exists, open and reconcile) every scope index and the shared index. The
 system SHALL update the owning index synchronously on its own note writes,
 reconcile external edits via a filesystem watcher (debounced and ignore-filtered,
 routing each event to the owning index idempotently by file metadata), and run a
-periodic stat-diff reconcile as a backstop for missed watcher events. Idle
+periodic stat-diff reconcile as a backstop for missed watcher events. When a
+single tool call performs multiple note writes as one logical operation (for
+example, `rename_memory_note` rewriting several referring notes), the system
+SHALL commit each affected index at most once for the whole operation rather
+than once per file, and SHALL guarantee the index reflects every one of the
+operation's writes by the time the tool call returns — matching the single-write
+"reflected immediately" guarantee, just amortized over the batch. Idle
 per-scope indexes SHALL be evicted least-recently-accessed-first so that after a
 recall completes the number of resident per-scope indexes does not exceed the
 configured `max_resident_scopes` bound (a configured value of 0 is treated as 1).
@@ -226,6 +232,22 @@ count so the eviction bound is verifiable by tests and benchmarks.
 - **WHEN** recall runs with `MUNINN_RECALL_INDEX_DIR` unset, under any backend
 - **THEN** no index data is written to disk and behavior is identical to the
   pre-persistence in-memory lifecycle
+
+#### Scenario: A multi-note rename commits once per affected index
+- **WHEN** `rename_memory_note` rewrites 50 referring notes across the
+  caller's own scope and the shared region in a single call
+- **THEN** the owning scope index and the shared index are each committed at
+  most once for the whole call, not once per rewritten referrer, and by the
+  time the call returns a recall in either region reflects every rewritten
+  referrer and the renamed note at its new path
+
+#### Scenario: A failed mid-rename write still leaves recall consistent with disk
+- **WHEN** `rename_memory_note` writes some referring notes to disk and then
+  a later write in the same operation fails
+- **THEN** the recall index for any index that was committed reflects exactly
+  the files that were actually written to disk before the failure — no
+  index entry for a file that failed to write, and no missing entry for one
+  that succeeded
 
 ### Requirement: Persisted index reuse across restarts
 When the index directory is configured and holds a valid persisted index for a
