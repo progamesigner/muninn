@@ -3,6 +3,7 @@
 //!
 //! See `openspec/changes/build-muninn-mcp-server/` for the full specification.
 
+pub mod backlink;
 pub mod config;
 pub mod error;
 pub mod frontmatter;

@@ -22,6 +22,7 @@ use schemars::generate::SchemaSettings;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+use crate::backlink::BacklinkEngine;
 use crate::config::Grant;
 use crate::error::MuninnError;
 use crate::path::{PhysicalPath, VirtualPath};
@@ -392,14 +393,25 @@ pub struct Toolbox {
     policy: Policy,
     timezone: Tz,
     tools: Vec<Tool>,
-    /// Absolute path to the global session-context (full) template file (may not exist).
-    session_context_template_file: PathBuf,
-    /// Absolute path to the global session-bootstrap (lean) template file (may not exist).
-    session_bootstrap_template_file: PathBuf,
-    /// Absolute path to the global memory-layout template file (may not exist).
-    memory_layout_template_file: PathBuf,
+    /// The global template files the context/bootstrap/layout renders read.
+    templates: TemplatePaths,
     /// The recall engine, present unless `MUNINN_RECALL_BACKEND=off`.
     recall: Option<Arc<RecallEngine>>,
+    /// The maintained backlink index: serves `collect_backlinks` and rename
+    /// Phase 1 discovery, and is notified synchronously on every write path.
+    backlinks: Arc<BacklinkEngine>,
+}
+
+/// The absolute paths of the global template files the session-context,
+/// session-bootstrap, and memory-layout renders read (each may not exist).
+#[derive(Debug, Clone)]
+pub struct TemplatePaths {
+    /// The global session-context (full) template file.
+    pub session_context: PathBuf,
+    /// The global session-bootstrap (lean) template file.
+    pub session_bootstrap: PathBuf,
+    /// The global memory-layout template file.
+    pub memory_layout: PathBuf,
 }
 
 impl Toolbox {
@@ -410,10 +422,9 @@ impl Toolbox {
         storage: Storage,
         policy: Policy,
         timezone: Tz,
-        session_context_template_file: PathBuf,
-        session_bootstrap_template_file: PathBuf,
-        memory_layout_template_file: PathBuf,
+        templates: TemplatePaths,
         recall: Option<Arc<RecallEngine>>,
+        backlinks: Arc<BacklinkEngine>,
     ) -> Toolbox {
         let scheme = storage.resolver().scheme().clone();
         let tools = build_tools(&scheme, recall.is_some());
@@ -422,10 +433,9 @@ impl Toolbox {
             policy,
             timezone,
             tools,
-            session_context_template_file,
-            session_bootstrap_template_file,
-            memory_layout_template_file,
+            templates,
             recall,
+            backlinks,
         }
     }
 
@@ -433,6 +443,11 @@ impl Toolbox {
     /// `GET /readyz` probe.
     pub fn recall_engine(&self) -> Option<Arc<RecallEngine>> {
         self.recall.clone()
+    }
+
+    /// The backlink engine handle, for the server's warm-up and watcher start.
+    pub fn backlink_engine(&self) -> Arc<BacklinkEngine> {
+        self.backlinks.clone()
     }
 
     /// The advertised tool list for `tools/list`.
@@ -504,6 +519,19 @@ impl Toolbox {
         if let Some(engine) = &self.recall {
             engine.on_write(scope, region, physical);
         }
+    }
+
+    /// Notify the backlink engine of the server's own write (or delete — the
+    /// engine treats a missing file as a removal) so its reverse index updates
+    /// synchronously.
+    fn backlinks_on_write(&self, scope: &str, region: Region, physical: &PhysicalPath) {
+        self.backlinks.on_write(scope, region, physical);
+    }
+
+    /// Notify the backlink engine of the server's own delete so the note's
+    /// out-edges are removed synchronously.
+    fn backlinks_on_delete(&self, scope: &str, region: Region, physical: &PhysicalPath) {
+        self.backlinks.on_delete(scope, region, physical);
     }
 }
 
@@ -637,8 +665,8 @@ impl Toolbox {
     ) -> Result<crate::session_context::SessionContext, MuninnError> {
         self.check_render_scope(scope, grant)?;
         let template_file = match kind {
-            crate::session_context::RenderKind::Context => &self.session_context_template_file,
-            crate::session_context::RenderKind::Bootstrap => &self.session_bootstrap_template_file,
+            crate::session_context::RenderKind::Context => &self.templates.session_context,
+            crate::session_context::RenderKind::Bootstrap => &self.templates.session_bootstrap,
         };
         crate::session_context::render_session_context(&self.storage, template_file, scope, kind)
     }
@@ -652,11 +680,7 @@ impl Toolbox {
         grant: &Grant,
     ) -> Result<String, MuninnError> {
         self.check_render_scope(scope, grant)?;
-        crate::session_context::render_layout(
-            &self.storage,
-            &self.memory_layout_template_file,
-            scope,
-        )
+        crate::session_context::render_layout(&self.storage, &self.templates.memory_layout, scope)
     }
 
     /// Validate that `scope` carries exactly the scheme's placeholder keys
@@ -1029,29 +1053,16 @@ impl Toolbox {
     }
 
     /// The clean virtual paths of every visible note containing at least one
-    /// link that resolves to `vpath`, deduplicated and sorted ascending. Notes
-    /// that cannot be read (raced deletion, non-UTF-8) are skipped — they cannot
-    /// contain resolvable links.
+    /// link that resolves to `vpath`, deduplicated and sorted ascending — looked
+    /// up in the caller's maintained reverse index (proportional to the result
+    /// set, not the vault).
     fn collect_backlinks(
         &self,
         scope: &str,
         vpath: &VirtualPath,
     ) -> Result<Vec<String>, MuninnError> {
         let target_clean = vpath.as_str().strip_suffix(".md").unwrap_or(vpath.as_str());
-        let resolver = self.storage.resolver();
-        let regions = self.policy.list_visible_regions(self.scheme().is_empty());
-        let index = self.storage.build_link_index(scope, &regions)?;
-        let mut backlinks = BTreeSet::new();
-        for referrer in self.storage.list_visible(scope, &regions)? {
-            let physical = resolver.resolve(scope, &referrer)?;
-            let Ok(content) = self.storage.read(&physical) else {
-                continue;
-            };
-            if crate::wikilink::references_to(&content, target_clean, scope, resolver, &index) {
-                backlinks.insert(referrer.as_str().to_string());
-            }
-        }
-        Ok(backlinks.into_iter().collect())
+        Ok(self.backlinks.backlinks(scope, target_clean))
     }
 
     fn write_memory_note(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
@@ -1192,6 +1203,7 @@ impl Toolbox {
                 self.storage.write_atomic(&physical, &content)?
             };
             self.recall_on_write(&scope, region, &physical);
+            self.backlinks_on_write(&scope, region, &physical);
             results.push(json!({ "path": path, "bytes_written": written }));
         }
         Ok(ok_json(json!({ "results": results })))
@@ -1222,6 +1234,7 @@ impl Toolbox {
             .storage
             .edit_search_replace(&physical, &search, &replace)?;
         self.recall_on_write(&scope, region, &physical);
+        self.backlinks_on_write(&scope, region, &physical);
         Ok(ok_json(json!({ "chars_replaced": replaced })))
     }
 
@@ -1241,6 +1254,7 @@ impl Toolbox {
             });
         }
         self.storage.delete(&physical)?;
+        self.backlinks_on_delete(&scope, region, &physical);
         Ok(ok_json(json!({ "deleted": true })))
     }
 
@@ -1323,10 +1337,14 @@ impl Toolbox {
             crate::wikilink::expand_links(&retargeted, &scope, dest_region, resolver, &post)?
         };
 
-        // Referrers: every visible note with a link resolving to the source must
-        // live in a writable region; compute each rewritten content now.
+        // Referrers: discovered by looking the source up in the caller's
+        // reverse index (proportional to the referrer set, not the vault). Each
+        // must live in a writable region; compute each rewritten content now.
         let mut rewrites: Vec<(Region, PhysicalPath, String)> = Vec::new();
-        for referrer in self.storage.list_visible(&scope, &regions)? {
+        for referrer in self.backlinks.backlinks(&scope, source_clean) {
+            let Ok(referrer) = VirtualPath::new(&referrer) else {
+                continue;
+            };
             if referrer == vpath {
                 continue; // the moved note's own content is handled above
             }
@@ -1334,9 +1352,6 @@ impl Toolbox {
             let Ok(r_content) = self.storage.read(&r_physical) else {
                 continue; // unreadable notes cannot contain resolvable links
             };
-            if !crate::wikilink::references_to(&r_content, source_clean, &scope, resolver, &index) {
-                continue;
-            }
             let r_region = resolver.detect_region(&referrer);
             self.policy
                 .gate_write(r_region)
@@ -1362,13 +1377,16 @@ impl Toolbox {
         let mut recall_guard = RecallCommitGuard::new(self.recall.clone());
         self.storage.write_atomic(&dest_physical, &dest_content)?;
         recall_guard.upsert(&scope, dest_region, &dest_physical);
+        self.backlinks_on_write(&scope, dest_region, &dest_physical);
         let notes_rewritten = rewrites.len();
         for (r_region, r_physical, rewritten) in rewrites {
             self.storage.write_atomic(&r_physical, &rewritten)?;
             recall_guard.upsert(&scope, r_region, &r_physical);
+            self.backlinks_on_write(&scope, r_region, &r_physical);
         }
         self.storage.delete(&src_physical)?;
         recall_guard.upsert(&scope, src_region, &src_physical);
+        self.backlinks_on_delete(&scope, src_region, &src_physical);
         drop(recall_guard);
 
         Ok(ok_json(json!({
@@ -1431,6 +1449,7 @@ impl Toolbox {
             Ok(next)
         })?;
         self.recall_on_write(&scope, region, &physical);
+        self.backlinks_on_write(&scope, region, &physical);
         // The response is the merged set in the agent-facing clean form, even
         // when untouched existing keys carry suffixed values.
         Ok(ok_json(
@@ -1444,7 +1463,7 @@ impl Toolbox {
         let scope = self.scope_map(args, &[])?;
         let sc = crate::session_context::render_session_context(
             &self.storage,
-            &self.session_context_template_file,
+            &self.templates.session_context,
             &scope,
             crate::session_context::RenderKind::Context,
         )?;
@@ -1518,6 +1537,7 @@ impl Toolbox {
         for (which, region, physical, content) in prepared {
             let written = self.storage.write_atomic(&physical, &content)?;
             self.recall_on_write(&scope, region, &physical);
+            self.backlinks_on_write(&scope, region, &physical);
             results.push(json!({ "which": which, "bytes_written": written }));
         }
         Ok(ok_json(json!({ "results": results })))
@@ -1598,6 +1618,7 @@ impl Toolbox {
             })
         })?;
         self.recall_on_write(&scope, region, &physical);
+        self.backlinks_on_write(&scope, region, &physical);
         Ok(ok_json(json!({ "bytes_written": written })))
     }
 
@@ -1621,6 +1642,7 @@ impl Toolbox {
         }
         let written = op(&physical, &self.storage)?;
         self.recall_on_write(scope, region, &physical);
+        self.backlinks_on_write(scope, region, &physical);
         Ok(ok_json(json!({ "bytes_written": written })))
     }
 

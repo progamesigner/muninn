@@ -3,34 +3,60 @@
 //! [`Toolbox`] directly — the same path the MCP `call_tool` handler uses — so the
 //! transform is exercised end to end alongside scope resolution and policy gating.
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use assert_fs::TempDir;
 use camino::Utf8PathBuf;
 use chrono_tz::Tz;
 use muninn::MuninnError;
-use muninn::config::Grant;
+use muninn::backlink::BacklinkEngine;
+use muninn::config::{Grant, RecallBackendKind, RecallConfig};
 use muninn::path::PathResolver;
 use muninn::policy::Policy;
 use muninn::scheme::Scheme;
 use muninn::storage::Storage;
-use muninn::tools::Toolbox;
+use muninn::tools::{TemplatePaths, Toolbox};
 use rmcp::model::CallToolResult;
 use serde_json::{Value, json};
 
 fn toolbox(tmp: &TempDir, policy: Policy) -> Toolbox {
-    let resolver = PathResolver::new(
-        tmp.path().canonicalize().unwrap(),
-        Utf8PathBuf::from("Agents"),
-        Scheme::parse("<agent>.<user>").unwrap(),
-    );
-    let storage = Storage::new(resolver, true, false, &[]);
+    let mk = || {
+        PathResolver::new(
+            tmp.path().canonicalize().unwrap(),
+            Utf8PathBuf::from("Agents"),
+            Scheme::parse("<agent>.<user>").unwrap(),
+        )
+    };
+    let storage = Storage::new(mk(), true, false, &[]);
+    // Freshness zero: every backlink query reconciles by stat-diff, matching
+    // the pre-index always-scan behavior for externally-written fixtures.
+    let backlinks = {
+        let config = RecallConfig {
+            backend: RecallBackendKind::Simple,
+            watch_debounce: Duration::ZERO,
+            regex_scan_byte_cap: usize::MAX,
+            max_resident_scopes: 256,
+            freshness: Duration::ZERO,
+            index_dir: None,
+        };
+        Arc::new(BacklinkEngine::new(
+            Arc::new(Storage::new(mk(), true, false, &[])),
+            policy.list_visible_regions(false),
+            &config,
+        ))
+    };
     Toolbox::new(
         storage,
         policy,
         Tz::UTC,
-        tmp.path().join("AGENT_SESSION_CONTEXT.md"),
-        tmp.path().join("AGENT_SESSION_BOOTSTRAP.md"),
-        tmp.path().join("AGENT_MEMORY_LAYOUT.md"),
+        TemplatePaths {
+            session_context: tmp.path().join("AGENT_SESSION_CONTEXT.md"),
+            session_bootstrap: tmp.path().join("AGENT_SESSION_BOOTSTRAP.md"),
+            memory_layout: tmp.path().join("AGENT_MEMORY_LAYOUT.md"),
+        },
         None,
+        backlinks,
     )
 }
 

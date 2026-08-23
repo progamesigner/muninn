@@ -165,7 +165,7 @@ where
 /// Strip the caller's suffix from one stored link target, per kind. `None` when
 /// the target does not carry the caller's suffix (shared and dangling targets
 /// are stored clean).
-fn strip_target(
+pub(crate) fn strip_target(
     kind: LinkKind,
     target: &str,
     rendered_scope: &str,
@@ -187,6 +187,10 @@ fn strip_target(
 /// the same rules as the forward transform, so backlinks are the exact inverse
 /// of link navigation: a dangling link counts toward nothing, and an ambiguous
 /// basename counts only toward the entry forward resolution selects.
+///
+/// Retained as the correctness oracle for the backlink index's tests (the query
+/// paths read the maintained reverse index instead of scanning).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn references_to(
     content: &str,
     target_clean_path: &str,
@@ -431,7 +435,7 @@ fn path_ends_with_segments(haystack: &str, needle: &str) -> bool {
 /// the target portion is replaced with `new` (alias, heading, embed prefix, and
 /// link text are preserved); `Ok(None)` leaves the link unchanged. The first
 /// `Err` aborts and propagates.
-fn rewrite_links<F>(content: &str, mut f: F) -> Result<String, MuninnError>
+pub(crate) fn rewrite_links<F>(content: &str, mut f: F) -> Result<String, MuninnError>
 where
     F: FnMut(LinkKind, &str) -> Result<Option<String>, MuninnError>,
 {

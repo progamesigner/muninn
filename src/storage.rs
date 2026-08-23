@@ -92,6 +92,37 @@ impl LinkIndex {
         }
     }
 
+    /// Whether a note at `clean_path` (extension stripped) is indexed.
+    pub(crate) fn contains(&self, clean_path: &str) -> bool {
+        let basename = clean_path
+            .rsplit_once('/')
+            .map(|(_, name)| name)
+            .unwrap_or(clean_path);
+        self.entries_for_basename(basename)
+            .iter()
+            .any(|e| e.clean_path == clean_path)
+    }
+
+    /// Drop the note at `clean_vpath` (extension stripped internally, mirroring
+    /// [`LinkIndex::insert`]). A no-op when the path is not indexed.
+    pub(crate) fn remove(&mut self, clean_vpath: &str) {
+        let clean_path = clean_vpath.strip_suffix(".md").unwrap_or(clean_vpath);
+        let basename = clean_path
+            .rsplit_once('/')
+            .map(|(_, name)| name)
+            .unwrap_or(clean_path);
+        if let Some(entries) = self.by_basename.get_mut(basename) {
+            entries.retain(|e| e.clean_path != clean_path);
+        }
+        if self
+            .by_basename
+            .get(basename)
+            .is_some_and(|entries| entries.is_empty())
+        {
+            self.by_basename.remove(basename);
+        }
+    }
+
     /// All visible notes sharing `basename` (its final segment), in deterministic
     /// order.
     pub fn entries_for_basename(&self, basename: &str) -> &[LinkEntry] {

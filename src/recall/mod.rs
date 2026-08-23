@@ -22,7 +22,7 @@
 //! merging, so the agent-facing score is comparable across the two corpora.
 
 #[cfg(feature = "recall-tantivy")]
-mod persist;
+pub(crate) mod persist;
 mod simple;
 #[cfg(feature = "recall-tantivy")]
 mod tantivy;
@@ -183,7 +183,7 @@ struct FileMeta {
 
 /// Which region an index covers.
 #[derive(Clone)]
-enum IndexRegion {
+pub(crate) enum IndexRegion {
     /// A per-scope index inside the agents folder, keyed by its rendered scope.
     Scoped(String),
     /// The single shared-region index outside the agents folder.

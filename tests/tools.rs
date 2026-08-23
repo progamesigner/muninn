@@ -12,15 +12,47 @@ use assert_fs::TempDir;
 use camino::Utf8PathBuf;
 use chrono_tz::Tz;
 use muninn::MuninnError;
+use muninn::backlink::BacklinkEngine;
 use muninn::config::{Grant, RecallBackendKind, RecallConfig};
 use muninn::path::PathResolver;
 use muninn::policy::Policy;
 use muninn::recall::RecallEngine;
 use muninn::scheme::Scheme;
 use muninn::storage::Storage;
-use muninn::tools::Toolbox;
+use muninn::tools::{TemplatePaths, Toolbox};
 use rmcp::model::CallToolResult;
 use serde_json::{Value, json};
+
+/// A backlink engine over the same vault, with a configurable freshness.
+/// Freshness zero makes every backlink query reconcile by stat-diff, matching
+/// the pre-index always-scan behavior for externally-written fixtures.
+fn backlink_engine(
+    tmp: &TempDir,
+    agents: &str,
+    scheme: &str,
+    policy: Policy,
+    freshness: Duration,
+) -> Arc<BacklinkEngine> {
+    let resolver = PathResolver::new(
+        tmp.path().canonicalize().unwrap(),
+        Utf8PathBuf::from(agents),
+        Scheme::parse(scheme).unwrap(),
+    );
+    let regions = policy.list_visible_regions(Scheme::parse(scheme).unwrap().is_empty());
+    let config = RecallConfig {
+        backend: RecallBackendKind::Simple,
+        watch_debounce: Duration::ZERO,
+        regex_scan_byte_cap: usize::MAX,
+        max_resident_scopes: 256,
+        freshness,
+        index_dir: None,
+    };
+    Arc::new(BacklinkEngine::new(
+        Arc::new(Storage::new(resolver, true, false, &[])),
+        regions,
+        &config,
+    ))
+}
 
 /// A toolbox with the `simple` recall backend enabled over the same vault.
 fn recall_toolbox(tmp: &TempDir) -> Toolbox {
@@ -51,10 +83,19 @@ fn recall_toolbox_tz(tmp: &TempDir, timezone: Tz) -> Toolbox {
         storage,
         Policy::Namespaced,
         timezone,
-        tmp.path().join("AGENT_SESSION_CONTEXT.md"),
-        tmp.path().join("AGENT_SESSION_BOOTSTRAP.md"),
-        tmp.path().join("AGENT_MEMORY_LAYOUT.md"),
+        TemplatePaths {
+            session_context: tmp.path().join("AGENT_SESSION_CONTEXT.md"),
+            session_bootstrap: tmp.path().join("AGENT_SESSION_BOOTSTRAP.md"),
+            memory_layout: tmp.path().join("AGENT_MEMORY_LAYOUT.md"),
+        },
         recall,
+        backlink_engine(
+            tmp,
+            "Agents",
+            "<agent>.<user>",
+            Policy::Namespaced,
+            Duration::ZERO,
+        ),
     )
 }
 
@@ -94,10 +135,13 @@ fn frozen_toolbox_policy(tmp: &TempDir, backend: RecallBackendKind, policy: Poli
         storage,
         policy,
         Tz::UTC,
-        tmp.path().join("AGENT_SESSION_CONTEXT.md"),
-        tmp.path().join("AGENT_SESSION_BOOTSTRAP.md"),
-        tmp.path().join("AGENT_MEMORY_LAYOUT.md"),
+        TemplatePaths {
+            session_context: tmp.path().join("AGENT_SESSION_CONTEXT.md"),
+            session_bootstrap: tmp.path().join("AGENT_SESSION_BOOTSTRAP.md"),
+            memory_layout: tmp.path().join("AGENT_MEMORY_LAYOUT.md"),
+        },
         recall,
+        backlink_engine(tmp, "Agents", "<agent>.<user>", policy, Duration::ZERO),
     )
 }
 
@@ -112,10 +156,13 @@ fn toolbox(tmp: &TempDir, agents: &str, scheme: &str, policy: Policy) -> Toolbox
         storage,
         policy,
         Tz::UTC,
-        tmp.path().join("AGENT_SESSION_CONTEXT.md"),
-        tmp.path().join("AGENT_SESSION_BOOTSTRAP.md"),
-        tmp.path().join("AGENT_MEMORY_LAYOUT.md"),
+        TemplatePaths {
+            session_context: tmp.path().join("AGENT_SESSION_CONTEXT.md"),
+            session_bootstrap: tmp.path().join("AGENT_SESSION_BOOTSTRAP.md"),
+            memory_layout: tmp.path().join("AGENT_MEMORY_LAYOUT.md"),
+        },
         None,
+        backlink_engine(tmp, agents, scheme, policy, Duration::ZERO),
     )
 }
 
@@ -4536,4 +4583,292 @@ fn recall_tool_absent_when_backend_off() {
             .iter()
             .all(|t| t.name != "recall_memory_notes")
     );
+}
+
+// --- write-path → backlink round trips (index maintenance on server writes) ---
+
+/// A toolbox whose backlink index never goes stale on its own (hour-long
+/// freshness, no watcher started): after the initial warm build, only the
+/// server's own write notifications can update the reverse index — so a
+/// write-then-backlink round trip proves the write path notified the engine.
+fn frozen_backlink_toolbox(tmp: &TempDir) -> Toolbox {
+    let mk = || {
+        PathResolver::new(
+            tmp.path().canonicalize().unwrap(),
+            Utf8PathBuf::from("Agents"),
+            Scheme::parse("<agent>.<user>").unwrap(),
+        )
+    };
+    let storage = Storage::new(mk(), true, false, &[]);
+    Toolbox::new(
+        storage,
+        Policy::Namespaced,
+        Tz::UTC,
+        TemplatePaths {
+            session_context: tmp.path().join("AGENT_SESSION_CONTEXT.md"),
+            session_bootstrap: tmp.path().join("AGENT_SESSION_BOOTSTRAP.md"),
+            memory_layout: tmp.path().join("AGENT_MEMORY_LAYOUT.md"),
+        },
+        None,
+        backlink_engine(
+            tmp,
+            "Agents",
+            "<agent>.<user>",
+            Policy::Namespaced,
+            Duration::from_secs(3600),
+        ),
+    )
+}
+
+/// [`frozen_backlink_toolbox`] with a writable shared region.
+fn frozen_backlink_toolbox_readwrite(tmp: &TempDir) -> Toolbox {
+    let mk = || {
+        PathResolver::new(
+            tmp.path().canonicalize().unwrap(),
+            Utf8PathBuf::from("Agents"),
+            Scheme::parse("<agent>.<user>").unwrap(),
+        )
+    };
+    let storage = Storage::new(mk(), true, false, &[]);
+    Toolbox::new(
+        storage,
+        Policy::Readwrite,
+        Tz::UTC,
+        TemplatePaths {
+            session_context: tmp.path().join("AGENT_SESSION_CONTEXT.md"),
+            session_bootstrap: tmp.path().join("AGENT_SESSION_BOOTSTRAP.md"),
+            memory_layout: tmp.path().join("AGENT_MEMORY_LAYOUT.md"),
+        },
+        None,
+        backlink_engine(
+            tmp,
+            "Agents",
+            "<agent>.<user>",
+            Policy::Readwrite,
+            Duration::from_secs(3600),
+        ),
+    )
+}
+
+/// Write the target note, then warm the backlink engine, so only the tested
+/// write can have added the link to the index.
+fn frozen_tb_with_target(tmp: &TempDir) -> Toolbox {
+    let tb = frozen_backlink_toolbox(tmp);
+    call(
+        &tb,
+        "write_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/topics/rust.md","content":"the rust note"}),
+    )
+    .unwrap();
+    tb.backlink_engine().warm();
+    tb
+}
+
+/// The backlinks of `Agents/topics/rust.md` for jarvis.tony.
+fn rust_backlinks(tb: &Toolbox) -> Value {
+    structured(call(
+        tb,
+        "read_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/topics/rust.md","backlinks":true}),
+    ))["backlinks"]
+        .clone()
+}
+
+#[test]
+fn write_memory_note_then_backlinks() {
+    let tmp = TempDir::new().unwrap();
+    let tb = frozen_tb_with_target(&tmp);
+    call(
+        &tb,
+        "write_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/notes/memo.md","content":"see [[rust]]"}),
+    )
+    .unwrap();
+    assert_eq!(rust_backlinks(&tb), json!(["Agents/notes/memo.md"]));
+}
+
+#[test]
+fn write_memory_notes_batch_then_backlinks() {
+    let tmp = TempDir::new().unwrap();
+    let tb = frozen_tb_with_target(&tmp);
+    call(
+        &tb,
+        "write_memory_notes",
+        json!({"agent":"jarvis","user":"tony","notes":[
+            {"path":"Agents/notes/a.md","content":"see [[rust]]"},
+            {"path":"Agents/notes/b.md","content":"see [[a]] and [[rust]]"},
+        ]}),
+    )
+    .unwrap();
+    // Both batch entries link the target; b's link to a (created by the same
+    // batch) resolved because a's write was indexed before b's was computed.
+    assert_eq!(
+        rust_backlinks(&tb),
+        json!(["Agents/notes/a.md", "Agents/notes/b.md"])
+    );
+    let body = structured(call(
+        &tb,
+        "read_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/notes/a.md","backlinks":true}),
+    ));
+    assert_eq!(body["backlinks"], json!(["Agents/notes/b.md"]));
+}
+
+#[test]
+fn edit_memory_note_adds_and_removes_backlinks() {
+    let tmp = TempDir::new().unwrap();
+    let tb = frozen_tb_with_target(&tmp);
+    call(
+        &tb,
+        "write_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/notes/memo.md","content":"no link"}),
+    )
+    .unwrap();
+    tb.backlink_engine().warm();
+
+    // Editing a link in adds the referrer.
+    call(
+        &tb,
+        "edit_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/notes/memo.md",
+               "search_string":"no link","replace_string":"see [[rust]]"}),
+    )
+    .unwrap();
+    assert_eq!(rust_backlinks(&tb), json!(["Agents/notes/memo.md"]));
+
+    // Editing it back out removes the referrer.
+    call(
+        &tb,
+        "edit_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/notes/memo.md",
+               "search_string":"see [[rust]]","replace_string":"no link"}),
+    )
+    .unwrap();
+    assert_eq!(rust_backlinks(&tb), json!([]));
+}
+
+#[test]
+fn update_note_properties_link_counts_toward_backlinks() {
+    let tmp = TempDir::new().unwrap();
+    let tb = frozen_tb_with_target(&tmp);
+    call(
+        &tb,
+        "write_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/notes/memo.md","content":"no body links"}),
+    )
+    .unwrap();
+    tb.backlink_engine().warm();
+    call(
+        &tb,
+        "update_note_properties",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/notes/memo.md",
+               "properties_json": json!({ "related": "[[rust]]" }).to_string()}),
+    )
+    .unwrap();
+    assert_eq!(rust_backlinks(&tb), json!(["Agents/notes/memo.md"]));
+}
+
+#[test]
+fn append_diary_entry_then_backlinks() {
+    let tmp = TempDir::new().unwrap();
+    let tb = frozen_tb_with_target(&tmp);
+    call(
+        &tb,
+        "append_diary_entry",
+        json!({"agent":"jarvis","user":"tony","content":"worked on [[rust]] today"}),
+    )
+    .unwrap();
+    let backlinks = rust_backlinks(&tb);
+    let arr = backlinks.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert!(
+        arr[0].as_str().unwrap().starts_with("Agents/diary/"),
+        "expected the diary entry as referrer, got {arr:?}"
+    );
+}
+
+#[test]
+fn rename_memory_note_moves_backlinks_to_the_destination() {
+    let tmp = TempDir::new().unwrap();
+    let tb = frozen_tb_with_target(&tmp);
+    call(
+        &tb,
+        "write_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/notes/memo.md","content":"see [[rust]]"}),
+    )
+    .unwrap();
+    tb.backlink_engine().warm();
+
+    call(
+        &tb,
+        "rename_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/topics/rust.md","new_path":"Agents/topics/rust-lang.md"}),
+    )
+    .unwrap();
+
+    // Discovery used the index, the referrer was rewritten, and the index moved
+    // the edge to the destination.
+    let body = structured(call(
+        &tb,
+        "read_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/topics/rust-lang.md","backlinks":true}),
+    ));
+    assert_eq!(body["backlinks"], json!(["Agents/notes/memo.md"]));
+    // The source path no longer exists; its old index entry is gone.
+    let err = call(
+        &tb,
+        "read_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/topics/rust.md","backlinks":true}),
+    );
+    assert_code(err, "not_found");
+}
+
+#[test]
+fn delete_memory_note_removes_the_referrer_from_backlinks() {
+    let tmp = TempDir::new().unwrap();
+    let tb = frozen_tb_with_target(&tmp);
+    call(
+        &tb,
+        "write_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/notes/memo.md","content":"see [[rust]]"}),
+    )
+    .unwrap();
+    tb.backlink_engine().warm();
+    assert_eq!(rust_backlinks(&tb), json!(["Agents/notes/memo.md"]));
+
+    call(
+        &tb,
+        "delete_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/notes/memo.md"}),
+    )
+    .unwrap();
+    assert_eq!(rust_backlinks(&tb), json!([]));
+}
+
+#[test]
+fn shared_region_write_updates_backlinks() {
+    let tmp = TempDir::new().unwrap();
+    let tb = frozen_backlink_toolbox_readwrite(&tmp);
+    // A shared target: a shared note may link it (shared → shared carries no
+    // suffix, so the cross-scope leak guard does not fire).
+    call(
+        &tb,
+        "write_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Lang/rust.md","content":"the shared rust note"}),
+    )
+    .unwrap();
+    tb.backlink_engine().warm();
+    call(
+        &tb,
+        "write_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Actions/release.md","content":"tracks [[rust]]"}),
+    )
+    .unwrap();
+    // The shared write updated the resident scope's index synchronously.
+    let body = structured(call(
+        &tb,
+        "read_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Lang/rust.md","backlinks":true}),
+    ));
+    assert_eq!(body["backlinks"], json!(["Actions/release.md"]));
 }

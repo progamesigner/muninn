@@ -68,14 +68,37 @@ impl MuninnServer {
             ));
             crate::recall::RecallEngine::new(engine_storage, config.recall.clone()).map(Arc::new)
         };
+        // The backlink engine is unconditional: backlink discovery and rename
+        // referrer discovery are served from the maintained reverse index. Like
+        // recall, it reads through its own `Storage` view; the visible regions
+        // are fixed here from the active policy (they never change at runtime).
+        let backlinks = {
+            let engine_storage = Arc::new(Storage::new(
+                config.resolver(),
+                config.honor_ignore_files,
+                config.include_hidden,
+                &config.include_hidden_globs,
+            ));
+            let regions = config
+                .policy
+                .list_visible_regions(config.resolver().scheme().is_empty());
+            Arc::new(crate::backlink::BacklinkEngine::new(
+                engine_storage,
+                regions,
+                &config.recall,
+            ))
+        };
         let toolbox = Toolbox::new(
             storage,
             config.policy,
             config.timezone,
-            config.session_context_template_file.clone(),
-            config.session_bootstrap_template_file.clone(),
-            config.memory_layout_template_file.clone(),
+            crate::tools::TemplatePaths {
+                session_context: config.session_context_template_file.clone(),
+                session_bootstrap: config.session_bootstrap_template_file.clone(),
+                memory_layout: config.memory_layout_template_file.clone(),
+            },
             recall,
+            backlinks,
         );
         MuninnServer {
             toolbox: Arc::new(toolbox),
@@ -93,12 +116,18 @@ impl MuninnServer {
 
     /// Start the recall filesystem watcher and kick off the eager index build in
     /// the background, so liveness stays up and `GET /readyz` flips green only once
-    /// every index is built. A no-op when recall is disabled.
+    /// every index is built. The backlink engine's watcher and eager build start
+    /// alongside (its readiness is not gated: a backlink query before the build
+    /// finishes builds inline, exactly like recall's cold path). A no-op for the
+    /// recall side when recall is disabled.
     pub fn spawn_recall_warmup(&self) {
         if let Some(engine) = self.toolbox.recall_engine() {
             engine.start_watcher();
             tokio::task::spawn_blocking(move || engine.warm());
         }
+        let backlinks = self.toolbox.backlink_engine();
+        backlinks.start_watcher();
+        tokio::task::spawn_blocking(move || backlinks.warm());
     }
 
     /// The scheme's placeholder idents, in order — the scope keys every surface

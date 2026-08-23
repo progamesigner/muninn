@@ -10,14 +10,37 @@ use std::time::Duration;
 use assert_fs::TempDir;
 use camino::Utf8PathBuf;
 use chrono_tz::Tz;
+use muninn::backlink::BacklinkEngine;
 use muninn::config::{RecallBackendKind, RecallConfig};
 use muninn::path::PathResolver;
 use muninn::policy::Policy;
 use muninn::recall::RecallEngine;
 use muninn::scheme::Scheme;
 use muninn::storage::Storage;
-use muninn::tools::Toolbox;
+use muninn::tools::{TemplatePaths, Toolbox};
 use serde_json::{Value, json};
+
+/// A backlink engine over the temp vault (never exercised by these tests).
+fn backlink_engine(tmp: &TempDir, scheme: &str) -> Arc<BacklinkEngine> {
+    let resolver = PathResolver::new(
+        tmp.path().canonicalize().unwrap(),
+        Utf8PathBuf::from("Agents"),
+        Scheme::parse(scheme).unwrap(),
+    );
+    let config = RecallConfig {
+        backend: RecallBackendKind::Simple,
+        watch_debounce: Duration::ZERO,
+        regex_scan_byte_cap: usize::MAX,
+        max_resident_scopes: 256,
+        freshness: Duration::ZERO,
+        index_dir: None,
+    };
+    Arc::new(BacklinkEngine::new(
+        Arc::new(Storage::new(resolver, true, false, &[])),
+        Policy::Namespaced.list_visible_regions(scheme.is_empty()),
+        &config,
+    ))
+}
 
 /// The `tools/list` schemas for a given scheme, as a name → inputSchema map.
 fn schemas_for(scheme: &str) -> Value {
@@ -32,10 +55,13 @@ fn schemas_for(scheme: &str) -> Value {
         storage,
         Policy::Namespaced,
         Tz::UTC,
-        tmp.path().join("AGENT_SESSION_CONTEXT.md"),
-        tmp.path().join("AGENT_SESSION_BOOTSTRAP.md"),
-        tmp.path().join("AGENT_MEMORY_LAYOUT.md"),
+        TemplatePaths {
+            session_context: tmp.path().join("AGENT_SESSION_CONTEXT.md"),
+            session_bootstrap: tmp.path().join("AGENT_SESSION_BOOTSTRAP.md"),
+            memory_layout: tmp.path().join("AGENT_MEMORY_LAYOUT.md"),
+        },
         None,
+        backlink_engine(&tmp, scheme),
     );
 
     let mut map = serde_json::Map::new();
@@ -77,10 +103,13 @@ fn recall_schema_for(scheme: &str) -> Value {
         storage,
         Policy::Namespaced,
         Tz::UTC,
-        tmp.path().join("AGENT_SESSION_CONTEXT.md"),
-        tmp.path().join("AGENT_SESSION_BOOTSTRAP.md"),
-        tmp.path().join("AGENT_MEMORY_LAYOUT.md"),
+        TemplatePaths {
+            session_context: tmp.path().join("AGENT_SESSION_CONTEXT.md"),
+            session_bootstrap: tmp.path().join("AGENT_SESSION_BOOTSTRAP.md"),
+            memory_layout: tmp.path().join("AGENT_MEMORY_LAYOUT.md"),
+        },
         recall,
+        backlink_engine(&tmp, scheme),
     );
     let tool = toolbox
         .list_tools()

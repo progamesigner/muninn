@@ -46,33 +46,22 @@ impl PersistRoot {
     /// The directory holding one region's index, created if absent. `None` when
     /// the directory cannot be created — the caller then stays in memory.
     pub(crate) fn region_dir(&self, region: &IndexRegion) -> Option<PathBuf> {
-        let dir = self.root.join(region_dir_name(region));
-        if let Err(err) = std::fs::create_dir_all(&dir) {
-            tracing::warn!(
-                dir = %dir.display(),
-                %err,
-                "could not create the persistent recall index directory; this region stays in memory"
-            );
-            return None;
-        }
-        match verify_region_identity(&dir, region) {
-            Ok(()) => Some(dir),
-            Err(err) => {
-                // A hash collision, or a directory written by an older layout:
-                // discard it rather than serve another region's notes.
-                tracing::warn!(
-                    dir = %dir.display(),
-                    %err,
-                    "persistent recall index directory belongs to a different region; rebuilding it"
-                );
-                if std::fs::remove_dir_all(&dir).is_err() {
-                    return None;
-                }
-                std::fs::create_dir_all(&dir).ok()?;
-                verify_region_identity(&dir, region).ok()?;
-                Some(dir)
-            }
-        }
+        claim_dir(
+            &self.root.join(region_dir_name(region)),
+            &region_identity(region),
+        )
+    }
+
+    /// The directory holding one rendered scope's persisted reverse backlink
+    /// index: `<fingerprint>/backlinks/scope-<hash>/`, created and
+    /// identity-checked like a recall region directory, so a hash collision can
+    /// never hand one scope's backlinks to another.
+    pub(crate) fn backlink_scope_dir(&self, scope: &str) -> Option<PathBuf> {
+        let dir = self
+            .root
+            .join("backlinks")
+            .join(format!("scope-{:016x}", fnv1a64(scope.as_bytes())));
+        claim_dir(&dir, &format!("backlinks-scope:{scope}"))
     }
 }
 
@@ -104,20 +93,51 @@ fn region_identity(region: &IndexRegion) -> String {
     }
 }
 
-/// Write the region identity if the directory is new, or check it if not.
-fn verify_region_identity(dir: &Path, region: &IndexRegion) -> std::io::Result<()> {
+/// Create `dir` if absent and verify it belongs to `identity`, wiping and
+/// reclaiming it on a mismatch. `None` when the directory cannot be secured —
+/// the caller then stays in memory.
+fn claim_dir(dir: &Path, identity: &str) -> Option<PathBuf> {
+    if let Err(err) = std::fs::create_dir_all(dir) {
+        tracing::warn!(
+            dir = %dir.display(),
+            %err,
+            "could not create the persistent index directory; this region stays in memory"
+        );
+        return None;
+    }
+    match verify_identity(dir, identity) {
+        Ok(()) => Some(dir.to_path_buf()),
+        Err(err) => {
+            // A hash collision, or a directory written by an older layout:
+            // discard it rather than serve another region's data.
+            tracing::warn!(
+                dir = %dir.display(),
+                %err,
+                "persistent index directory belongs to a different region; rebuilding it"
+            );
+            if std::fs::remove_dir_all(dir).is_err() {
+                return None;
+            }
+            std::fs::create_dir_all(dir).ok()?;
+            verify_identity(dir, identity).ok()?;
+            Some(dir.to_path_buf())
+        }
+    }
+}
+
+/// Write the identity marker if the directory is new, or check it if not.
+fn verify_identity(dir: &Path, identity: &str) -> std::io::Result<()> {
     let marker = dir.join(REGION_ID_FILE);
-    let want = region_identity(region);
     match std::fs::read_to_string(&marker) {
-        Ok(found) if found == want => Ok(()),
+        Ok(found) if found == identity => Ok(()),
         Ok(found) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("index directory holds region {found:?}, expected {want:?}"),
+            format!("index directory holds region {found:?}, expected {identity:?}"),
         )),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             // A fresh (or wiped) directory: claim it. Empty of an index, so a
             // torn write here is corrected by the next open.
-            std::fs::write(&marker, want.as_bytes())
+            std::fs::write(&marker, identity.as_bytes())
         }
         Err(err) => Err(err),
     }
