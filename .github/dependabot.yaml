@@ -1,0 +1,43 @@
+# Dependabot keeps the pinned versions in this repository moving. Actions are
+# pinned to immutable commit SHAs, which means they never pick up upstream
+# fixes on their own — including security fixes — so something has to propose
+# the bumps. Dependabot reads the `# vX.Y.Z` comment beside each SHA and
+# rewrites both the SHA and the comment together.
+#
+# These three cover every dependency manifest in the repository: the workflow
+# actions, the crate graph, and the Dockerfile's builder base image.
+version: 2
+
+updates:
+# The workflow actions in .github/workflows. Grouped into a single PR: they
+# move together often enough that one weekly review beats nine separate PRs.
+- package-ecosystem: github-actions
+  directory: /
+  schedule:
+    interval: weekly
+  groups:
+    actions:
+      patterns:
+      - '*'
+
+# Crate dependencies in Cargo.toml / Cargo.lock. Minor and patch bumps are
+# grouped, while majors stay separate so a breaking change gets reviewed on
+# its own rather than riding along in a batch.
+- package-ecosystem: cargo
+  directory: /
+  schedule:
+    interval: weekly
+  groups:
+    cargo:
+      update-types:
+      - minor
+      - patch
+
+# The Dockerfile's builder base image (messense/cargo-zigbuild). This is the
+# pin that silently went stale and broke the arm64 leg of v1.1.2 when a new
+# Rust stable started emitting a linker argument the older zig could not
+# handle, so it is worth watching on its own.
+- package-ecosystem: docker
+  directory: /
+  schedule:
+    interval: weekly
