@@ -59,7 +59,7 @@ harness = false
 
 [dev-dependencies]
 assert_fs = "1.1.4"
-criterion = { version = "0.5.1", features = ["html_reports"] }
+criterion = { version = "0.8.2", features = ["html_reports"] }
 insta = { version = "1.47", features = ["json"] }
 # MCP client harness for stdio + http integration tests.
 rmcp = { version = "1.7", features = [
