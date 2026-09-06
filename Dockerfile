@@ -4,7 +4,7 @@
 # Rust + zig + cargo-zigbuild in one image. Pinned to the *build* platform so
 # the arm64 artifact is cross-compiled on the native runner rather than built
 # under slow QEMU emulation. cargo-zigbuild links musl targets via zig.
-FROM --platform=$BUILDPLATFORM messense/cargo-zigbuild:0.23.0 AS builder
+FROM --platform=$BUILDPLATFORM messense/cargo-zigbuild:0.23.4 AS builder
 
 # Docker sets TARGETARCH to the architecture currently being assembled.
 ARG TARGETARCH
