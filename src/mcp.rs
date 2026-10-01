@@ -13,12 +13,11 @@ use std::sync::Arc;
 
 use rmcp::ServerHandler;
 use rmcp::model::{
-    AnnotateAble, CallToolRequestParams, CallToolResult, GetPromptRequestParams, GetPromptResult,
-    Implementation, InitializeRequestParams, InitializeResult, ListPromptsResult,
+    CallToolRequestParams, CallToolResponse, GetPromptRequestParams, GetPromptResponse,
+    GetPromptResult, Implementation, InitializeRequestParams, InitializeResult, ListPromptsResult,
     ListResourceTemplatesResult, ListToolsResult, PaginatedRequestParams, Prompt, PromptArgument,
-    PromptMessage, PromptMessageRole, ProtocolVersion, RawResourceTemplate,
-    ReadResourceRequestParams, ReadResourceResult, ResourceContents, ServerCapabilities,
-    ServerInfo,
+    PromptMessage, ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse,
+    ReadResourceResult, ResourceContents, ResourceTemplate, Role, ServerCapabilities, ServerConfig,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, model::JsonObject};
@@ -281,15 +280,15 @@ fn request_grant(context: &RequestContext<RoleServer>) -> Grant {
 }
 
 impl ServerHandler for MuninnServer {
-    fn get_info(&self) -> ServerInfo {
-        // `ServerInfo` is `#[non_exhaustive]`, so it cannot be built with a struct
+    fn get_info(&self) -> ServerConfig {
+        // `ServerConfig` is `#[non_exhaustive]`, so it cannot be built with a struct
         // expression here; start from its `Default` and override the rest.
         // `Implementation::from_build_env()` is *not* good enough for `server_info`:
         // its `env!("CARGO_CRATE_NAME")` is baked in where that line is compiled
         // (inside the `rmcp` crate itself), so it always resolves to `"rmcp"`
         // regardless of which binary links it. Build our own from this crate's
         // own build-time env instead.
-        let mut info = ServerInfo::default();
+        let mut info = ServerConfig::default();
         info.server_info = Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         info.capabilities = ServerCapabilities::builder()
             .enable_tools()
@@ -340,7 +339,7 @@ impl ServerHandler for MuninnServer {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         let args: JsonObject = request.arguments.unwrap_or_default();
         let grant = request_grant(&context);
         let toolbox = Arc::clone(&self.toolbox);
@@ -356,8 +355,8 @@ impl ServerHandler for MuninnServer {
         .await
         .map_err(to_join_error)?;
         match outcome {
-            Some(Ok(result)) => Ok(result),
-            Some(Err(err)) => Ok(err.into_tool_result()),
+            Some(Ok(result)) => Ok(result.into()),
+            Some(Err(err)) => Ok(err.into_tool_result().into()),
             None => Err(McpError::invalid_params(
                 format!("unknown tool '{name}'"),
                 None,
@@ -371,43 +370,33 @@ impl ServerHandler for MuninnServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
         let templates = vec![
-            RawResourceTemplate {
-                uri_template: self.uri_template_for(SESSION_CONTEXT_URI_PREFIX),
-                name: SESSION_CONTEXT_NAME.to_string(),
-                title: Some("Session context".to_string()),
-                description: Some(
-                    "The full rendered session context for a scope: the foundational \
-                     files woven into the configured template."
-                        .to_string(),
-                ),
-                mime_type: Some("text/markdown".to_string()),
-                icons: None,
-            }
-            .no_annotation(),
-            RawResourceTemplate {
-                uri_template: self.uri_template_for(SESSION_BOOTSTRAP_URI_PREFIX),
-                name: SESSION_BOOTSTRAP_NAME.to_string(),
-                title: Some("Session bootstrap".to_string()),
-                description: Some(
-                    "The lean session bootstrap for a scope: scope, persona, rules, and \
-                     pointers to the full context and the layout."
-                        .to_string(),
-                ),
-                mime_type: Some("text/markdown".to_string()),
-                icons: None,
-            }
-            .no_annotation(),
-            RawResourceTemplate {
-                uri_template: self.uri_template_for(SESSION_LAYOUT_URI_PREFIX),
-                name: SESSION_LAYOUT_NAME.to_string(),
-                title: Some("Session layout".to_string()),
-                description: Some(
-                    "The vault layout and conventions guidance for a scope.".to_string(),
-                ),
-                mime_type: Some("text/markdown".to_string()),
-                icons: None,
-            }
-            .no_annotation(),
+            ResourceTemplate::new(
+                self.uri_template_for(SESSION_CONTEXT_URI_PREFIX),
+                SESSION_CONTEXT_NAME,
+            )
+            .with_title("Session context")
+            .with_description(
+                "The full rendered session context for a scope: the foundational \
+                     files woven into the configured template.",
+            )
+            .with_mime_type("text/markdown"),
+            ResourceTemplate::new(
+                self.uri_template_for(SESSION_BOOTSTRAP_URI_PREFIX),
+                SESSION_BOOTSTRAP_NAME,
+            )
+            .with_title("Session bootstrap")
+            .with_description(
+                "The lean session bootstrap for a scope: scope, persona, rules, and \
+                     pointers to the full context and the layout.",
+            )
+            .with_mime_type("text/markdown"),
+            ResourceTemplate::new(
+                self.uri_template_for(SESSION_LAYOUT_URI_PREFIX),
+                SESSION_LAYOUT_NAME,
+            )
+            .with_title("Session layout")
+            .with_description("The vault layout and conventions guidance for a scope.")
+            .with_mime_type("text/markdown"),
         ];
         Ok(ListResourceTemplatesResult::with_all_items(templates))
     }
@@ -416,7 +405,7 @@ impl ServerHandler for MuninnServer {
         &self,
         request: ReadResourceRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, McpError> {
+    ) -> Result<ReadResourceResponse, McpError> {
         let grant = request_grant(&context);
         // Dispatch by URI prefix to the matching render. Longest/most-specific is
         // unambiguous: the three prefixes share no common tail. URI parsing is
@@ -454,10 +443,7 @@ impl ServerHandler for MuninnServer {
         .await
         .map_err(to_join_error)?
         .map_err(to_mcp_error)?;
-        Ok(ReadResourceResult::new(vec![ResourceContents::text(
-            rendered,
-            request.uri,
-        )]))
+        Ok(ReadResourceResult::new(vec![ResourceContents::text(rendered, request.uri)]).into())
     }
 
     async fn list_prompts(
@@ -488,7 +474,7 @@ impl ServerHandler for MuninnServer {
         &self,
         request: GetPromptRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<GetPromptResult, McpError> {
+    ) -> Result<GetPromptResponse, McpError> {
         if request.name != SESSION_CONTEXT_NAME {
             return Err(McpError::invalid_params(
                 format!("unknown prompt '{}'", request.name),
@@ -508,11 +494,11 @@ impl ServerHandler for MuninnServer {
         .await
         .map_err(to_join_error)?
         .map_err(to_mcp_error)?;
-        Ok(GetPromptResult::new(vec![PromptMessage::new_text(
-            PromptMessageRole::User,
-            sc.rendered,
-        )])
-        .with_description("Session-context bootstrap."))
+        Ok(
+            GetPromptResult::new(vec![PromptMessage::new_text(Role::User, sc.rendered)])
+                .with_description("Session-context bootstrap.")
+                .into(),
+        )
     }
 }
 
@@ -530,7 +516,7 @@ mod tests {
     /// the transport integration tests.)
     #[tokio::test]
     async fn a_panicking_blocking_task_maps_to_an_internal_error() {
-        let joined = tokio::task::spawn_blocking(|| -> Option<CallToolResult> {
+        let joined = tokio::task::spawn_blocking(|| -> Option<rmcp::model::CallToolResult> {
             panic!("handler exploded");
         })
         .await;

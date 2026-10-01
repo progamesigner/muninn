@@ -6,8 +6,7 @@
 //! `prompts/get`, including the empty-vault case and a VFS-scheme variation.
 
 use rmcp::model::{
-    CallToolRequestParams, GetPromptRequestParams, PromptMessageContent, ReadResourceRequestParams,
-    ResourceContents,
+    CallToolRequestParams, GetPromptRequestParams, ReadResourceRequestParams, ResourceContents,
 };
 use rmcp::service::ServiceExt;
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
@@ -40,10 +39,12 @@ fn resource_text(result: &rmcp::model::ReadResourceResult) -> String {
 }
 
 fn prompt_text(result: &rmcp::model::GetPromptResult) -> String {
-    match &result.messages[0].content {
-        PromptMessageContent::Text { text } => text.clone(),
-        _ => panic!("expected text prompt content"),
-    }
+    result.messages[0]
+        .content
+        .as_text()
+        .expect("expected text prompt content")
+        .text
+        .clone()
 }
 
 #[tokio::test]

@@ -16,7 +16,7 @@ use std::time::SystemTime;
 
 use chrono::{LocalResult, NaiveDate, NaiveTime, Utc};
 use chrono_tz::Tz;
-use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
+use rmcp::model::{CallToolResult, ContentBlock, JsonObject, Tool};
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 use serde::Deserialize;
@@ -999,7 +999,7 @@ impl Toolbox {
         if want_backlinks {
             structured["backlinks"] = json!(self.collect_backlinks(&scope, &vpath)?);
         }
-        let mut result = CallToolResult::success(vec![Content::text(content)]);
+        let mut result = CallToolResult::success(vec![ContentBlock::text(content)]);
         result.structured_content = Some(structured);
         Ok(result)
     }
@@ -1790,7 +1790,7 @@ fn parse_filters(args: &JsonObject) -> Result<Vec<PropertyFilter>, MuninnError> 
 /// structured content is `value`.
 fn ok_json(value: Value) -> CallToolResult {
     let text = serde_json::to_string(&value).unwrap_or_default();
-    let mut result = CallToolResult::success(vec![Content::text(text)]);
+    let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
     result.structured_content = Some(value);
     result
 }
