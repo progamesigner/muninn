@@ -81,7 +81,7 @@ pub async fn serve(
     // session or an SSE stream to carry. Each `POST /mcp` is answered with a
     // plain `application/json` body, no `Mcp-Session-Id` is issued, and the
     // `GET /mcp` resume churn disappears.
-    .with_stateful_mode(false)
+    .with_legacy_session_mode(false)
     .with_json_response(true);
 
     let mcp_service = StreamableHttpService::new(

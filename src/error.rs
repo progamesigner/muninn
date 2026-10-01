@@ -8,7 +8,7 @@
 //! carry only an [`std::io::ErrorKind`] and a static context label.
 
 use rmcp::ErrorData as McpError;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::json;
 
 /// The structured discriminator attached to every error surfaced to a client.
@@ -176,7 +176,7 @@ impl MuninnError {
     pub fn into_tool_result(self) -> CallToolResult {
         let code = self.code().as_str();
         let message = self.to_string();
-        let mut result = CallToolResult::error(vec![Content::text(message.clone())]);
+        let mut result = CallToolResult::error(vec![ContentBlock::text(message.clone())]);
         result.structured_content = Some(json!({ "code": code, "message": message }));
         result
     }
