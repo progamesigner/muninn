@@ -4,7 +4,8 @@
 //! All full-file writes use the temp-file + fsync + rename pattern for crash
 //! safety. Concurrent writes to the same target within this process are
 //! serialised by a per-target advisory lock. Cross-process races are tolerated
-//! (last-writer-wins via the atomic rename), per design decision D5.
+//! (last-writer-wins via the atomic rename), per design decision D5. Conditional
+//! brief writes additionally hold a stable OS file lock across compare and rename.
 
 use std::collections::BTreeSet;
 use std::io::Write as _;
@@ -17,10 +18,23 @@ use camino::{Utf8Component, Utf8Path};
 use dashmap::DashMap;
 use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use sha2::{Digest, Sha256};
 
 use crate::error::MuninnError;
 use crate::path::{PathResolver, PhysicalPath, VirtualPath};
 use crate::policy::Region;
+
+/// Content identity for an exact on-disk snapshot, before any read transforms.
+/// Identical bytes intentionally share a version; this is not a revision counter.
+pub fn content_version(content: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(content))
+}
+
+/// A conditional write has exactly one precondition; there is no overwrite mode.
+pub enum ExpectedState<'a> {
+    Absent,
+    Version(&'a str),
+}
 
 /// An opaque pagination cursor — a base64-encoded byte offset into the
 /// deterministic listing order.
@@ -224,6 +238,57 @@ impl Storage {
             }),
             Err(e) => Err(MuninnError::io("reading note", &e)),
         }
+    }
+
+    /// Atomically compare and replace a managed brief across Storage instances and
+    /// processes sharing this vault. The filesystem must support advisory locks.
+    /// External editors must cooperate with this lock to serialize their writes.
+    pub fn write_conditional(
+        &self,
+        physical: &PhysicalPath,
+        content: &str,
+        expected: ExpectedState<'_>,
+    ) -> Result<usize, MuninnError> {
+        self.with_target_lock(physical.as_path(), || {
+            self.mkdirs_for(physical)?;
+            let target = physical.as_path();
+            let name = target.file_name().expect("resolved note has a filename");
+            let mut lock_name = std::ffi::OsString::from(".");
+            lock_name.push(name);
+            lock_name.push(".cas-lock");
+            let lock_path = target.with_file_name(lock_name);
+            // Never unlink this file: different inodes would break mutual exclusion
+            // after an atomic rename. Open without truncating existing metadata.
+            if std::fs::symlink_metadata(&lock_path).is_ok_and(|m| !m.is_file()) {
+                return Err(MuninnError::PathNotPermitted {
+                    virtual_path: self.display_path(physical),
+                });
+            }
+            let lock = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(lock_path)
+                .map_err(|e| MuninnError::io("opening brief lock", &e))?;
+            lock.lock()
+                .map_err(|e| MuninnError::io("locking brief", &e))?;
+            let current = match std::fs::read(target) {
+                Ok(bytes) => Some(bytes),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(MuninnError::io("reading brief for comparison", &e)),
+            };
+            let matches = match (expected, current.as_deref()) {
+                (ExpectedState::Absent, None) => true,
+                (ExpectedState::Version(version), Some(bytes)) => content_version(bytes) == version,
+                _ => false,
+            };
+            if !matches {
+                return Err(MuninnError::Conflict);
+            }
+            // `lock` remains held until this closure returns, including the rename.
+            self.write_atomic_locked(physical, content)
+        })
     }
 
     /// Atomically write the full contents of a file: temp file in the same
