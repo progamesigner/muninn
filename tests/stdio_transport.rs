@@ -34,7 +34,7 @@ async fn stdio_initialize_list_and_roundtrip() {
     // tools/list returns the fourteen core tools plus recall_memory_notes, which
     // the default `simple` recall backend enables.
     let tools = service.list_tools(Default::default()).await.unwrap();
-    assert_eq!(tools.tools.len(), 15);
+    assert_eq!(tools.tools.len(), 16);
     assert!(tools.tools.iter().any(|t| t.name == "recall_memory_notes"));
 
     // write then read a memory note round-trip.

@@ -105,9 +105,9 @@ const DEFAULT_BOOTSTRAP: &str = "\
 const DEFAULT_LAYOUT: &str = "\
 # Memory Layout
 
-The following layout is a suggestion, not a rule. The server enforces only two
-things: core files are wrapper-only (see below) and the line caps on `USER.md`
-and `MEMORY.md`. Everything else here is guidance you may adapt.
+The following layout is a suggestion. The server enforces wrapper-only core
+files and the documented content bounds below. Everything else here is guidance
+you may adapt.
 
 A small set of core files are special: they are changed only through their
 dedicated wrapper tools and are bounded by the line caps. Every other path
@@ -121,10 +121,14 @@ Core files (changed only through the dedicated wrapper tools):
   is up to you; keep it a concise index, not a dumping ground.
 - `USER.md` — the user profile (≤ 100 lines).
 - `PROMPT.md` — workflow rules, plus facts about external tools you operate.
-- `HEARTBEAT.md` — current task heartbeat.
+- `HEARTBEAT.md` — current tasks and progress.
+- `AGENTS.md` — optional collaboration brief: recent agreements, summaries, and
+  links (≤ 200 lines and 65536 UTF-8 bytes). Keep detailed knowledge in its
+  canonical notes; this brief is separate from task heartbeat and session context.
 
 Addressing: every path below is shown relative to the agents folder. The wrapper
-tools (`append_diary_entry`, `evolve_core_persona`, `update_task_heartbeat`) add
+tools (`append_diary_entry`, `evolve_core_persona`, `update_task_heartbeat`,
+`update_agents_file`) add
 your agents-folder name for you. The generic note tools (`write_memory_note`,
 `edit_memory_note`, `delete_memory_note`, `read_memory_note`) take the full path
 from the vault root, so you must prepend your agents-folder name yourself — e.g.
@@ -139,10 +143,15 @@ Subfolders (free-form notes via `write_memory_note`/`edit_memory_note`):
 - `topics/INDEX.md`, `topics/LOG.md`, and `topics/<topic>/<fact>.md` — durable facts.
 - `skills/<skill>/SKILL.md` and `skills/<skill>/references/<name>.md` — skills.
 - `agents/<subagent>/PROMPT.md` and `agents/<subagent>/<context>.md` — subagents.
+- `commands/<name>.md` — personal command templates.
 
 How the managed files are written:
 - Diary entries are appended with `append_diary_entry` and read back with
   `read_memory_note`; do not hand-write them.
+- Update the collaboration brief through `update_agents_file` only after an
+  explicit user request. Read `AGENTS.md` with `include_version=true`, then pass
+  `expected_version`; for a missing brief use `expected_absent=true`. Conflicts
+  leave the current file unchanged: read again before retrying.
 - The task heartbeat is updated through `update_task_heartbeat`, which targets
   `HEARTBEAT.md`.
 - The core root files (`PERSONA.md`, `PROMPT.md`, `RULES.md`, `USER.md`,
@@ -152,7 +161,9 @@ How the managed files are written:
   target paths under a subfolder; root-level core files are reserved for the
   wrappers.
 
-Line caps (enforced on tool writes): `USER.md` ≤ 100 lines, `MEMORY.md` ≤ 200 lines.
+Content bounds (enforced on tool writes): `RULES.md` ≤ 40 lines,
+`USER.md` ≤ 100 lines, `MEMORY.md` ≤ 200 lines,
+`AGENTS.md` ≤ 200 lines and 65536 UTF-8 bytes.
 ";
 
 /// The rendered session-context plus the foundational files that were absent.

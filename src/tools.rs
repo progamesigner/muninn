@@ -1,5 +1,5 @@
 //! The agent-facing tool surface: schema generation, scope extraction, and the
-//! tool handlers (the fourteen memory-note tools plus `recall_memory_notes` when
+//! tool handlers (the memory-note tools plus `recall_memory_notes` when
 //! the recall backend is enabled).
 //!
 //! Each tool's input schema is assembled at startup by merging the
@@ -29,7 +29,7 @@ use crate::path::{PhysicalPath, VirtualPath};
 use crate::policy::{Policy, PolicyError, Region};
 use crate::recall::{FilterOp, PropertyFilter, RecallEngine, RecallQuery, Touched};
 use crate::scheme::Scheme;
-use crate::storage::{Cursor, LinkEntry, Storage};
+use crate::storage::{Cursor, ExpectedState, LinkEntry, Storage, content_version};
 
 /// The default page size for `list_memory_notes`.
 const DEFAULT_LIMIT: u64 = 200;
@@ -57,6 +57,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "update_note_properties",
     "load_session_context",
     "evolve_core_persona",
+    "update_agents_file",
     "update_task_heartbeat",
     "append_diary_entry",
 ];
@@ -174,6 +175,24 @@ struct ReadFields {
     /// one link that resolves to this note, deduplicated and sorted ascending.
     /// Absent or `false` leaves the response unchanged.
     backlinks: Option<bool>,
+    /// Include an opaque version of the complete stored bytes in the structured
+    /// result, before link stripping or line slicing. Absent or false preserves
+    /// the default response. Pass the version to update_agents_file.
+    include_version: Option<bool>,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+struct BriefFields {
+    /// Complete replacement collaboration brief: at most 200 lines and 65536
+    /// UTF-8 bytes, including after wikilink expansion. Tasks belong in HEARTBEAT.
+    content: String,
+    /// Version returned by a read with include_version=true, or null for initial
+    /// creation. Exactly one of a nonempty version or expected_absent=true is required.
+    expected_version: Option<String>,
+    /// True only when creating a brief previously observed to be absent. An
+    /// existing brief causes conflict; never falls back to unconditional overwrite.
+    expected_absent: Option<bool>,
 }
 
 #[derive(JsonSchema)]
@@ -483,6 +502,7 @@ impl Toolbox {
             "load_session_context" => Toolbox::load_session_context,
             "evolve_core_persona" => Toolbox::evolve_core_persona,
             "update_task_heartbeat" => Toolbox::update_task_heartbeat,
+            "update_agents_file" => Toolbox::update_agents_file,
             "append_diary_entry" => Toolbox::append_diary_entry,
             "recall_memory_notes" if self.recall.is_some() => Toolbox::recall_memory_notes,
             _ => return None,
@@ -733,18 +753,42 @@ impl Toolbox {
 
     /// Reject a generic write/edit/delete that targets an agents-folder
     /// root-level core file. Such files are reserved for the dedicated wrappers
-    /// (`evolve_core_persona`, `update_task_heartbeat`); the returned error
+    /// (`evolve_core_persona`, `update_task_heartbeat`, `update_agents_file`); the returned error
     /// carries `path_not_permitted` and names the wrapper to use. A no-op for
     /// subfolder paths and for paths outside the agents folder.
-    fn reject_if_root_reserved(&self, vpath: &VirtualPath) -> Result<(), MuninnError> {
+    fn reject_if_root_reserved(&self, scope: &str, vpath: &VirtualPath) -> Result<(), MuninnError> {
         if !self.storage.resolver().is_agents_root_level(vpath) {
+            // A directory symlink inside the vault must not let a generic path
+            // reach the same brief entry under a different lexical parent.
+            let resolver = self.storage.resolver();
+            let physical = resolver.resolve(scope, vpath)?;
+            let brief = resolver.resolve(scope, &self.agents_vpath("AGENTS.md")?)?;
+            let aliases_brief = physical.as_path().file_name() == brief.as_path().file_name()
+                && physical
+                    .as_path()
+                    .parent()
+                    .and_then(|p| p.canonicalize().ok())
+                    .zip(brief.as_path().parent().and_then(|p| p.canonicalize().ok()))
+                    .is_some_and(|(parent, brief_parent)| parent == brief_parent);
+            if aliases_brief {
+                return Err(MuninnError::RootPathReserved {
+                    virtual_path: vpath.as_str().to_string(),
+                    wrapper: "update_agents_file",
+                });
+            }
             return Ok(());
         }
         let is_heartbeat = vpath
             .as_path()
             .file_name()
             .is_some_and(|name| name == "HEARTBEAT.md");
-        let wrapper = if is_heartbeat {
+        let is_brief = vpath
+            .as_path()
+            .file_name()
+            .is_some_and(|name| name == "AGENTS.md");
+        let wrapper = if is_brief {
+            "update_agents_file"
+        } else if is_heartbeat {
             "update_task_heartbeat"
         } else {
             "evolve_core_persona"
@@ -987,12 +1031,29 @@ impl Toolbox {
     }
 
     fn read_memory_note(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
-        let scope = self.resolve_scope(args, &["path", "backlinks", "offset", "limit"])?;
+        let scope = self.resolve_scope(
+            args,
+            &["path", "backlinks", "offset", "limit", "include_version"],
+        )?;
         let vpath = VirtualPath::new(&require_str(args, "path")?)?;
         let want_backlinks = opt_bool(args, "backlinks")?.unwrap_or(false);
         let range = opt_line_range(args)?;
-        let (content, total_lines) = self.read_one_ranged(&scope, &vpath, range)?;
+        let want_version = opt_bool(args, "include_version")?.unwrap_or(false);
+        // Read exactly once: the token and transformed/sliced content must identify
+        // the same snapshot even when another process replaces the file concurrently.
+        let raw = self.read_raw(&scope, &vpath)?;
+        let clean = self.strip_links_for(&scope, &raw);
+        let (content, total_lines) = match range {
+            Some(range) => {
+                let (content, total) = slice_lines(&clean, range);
+                (content, Some(total))
+            }
+            None => (clean, None),
+        };
         let mut structured = json!({ "content": &content });
+        if want_version {
+            structured["version"] = json!(content_version(raw.as_bytes()));
+        }
         if let Some(total) = total_lines {
             structured["total_lines"] = json!(total);
         }
@@ -1070,7 +1131,7 @@ impl Toolbox {
         let vpath = VirtualPath::new(&require_str(args, "path")?)?;
         let content = require_str(args, "content")?;
         let append = opt_bool(args, "append")?.unwrap_or(false);
-        self.reject_if_root_reserved(&vpath)?;
+        self.reject_if_root_reserved(&scope, &vpath)?;
         // Gate by policy before the link transform so a read-only/denied region
         // reports its policy error rather than a leak-guard `write_denied`.
         let region = self.storage.resolver().detect_region(&vpath);
@@ -1168,7 +1229,7 @@ impl Toolbox {
 
         let mut prepared = Vec::with_capacity(entries.len());
         for (path, vpath, region, content, append) in entries {
-            self.reject_if_root_reserved(&vpath)?;
+            self.reject_if_root_reserved(&scope, &vpath)?;
             self.policy
                 .gate_write(region)
                 .map_err(|e| Self::policy_err(e, &vpath))?;
@@ -1214,7 +1275,7 @@ impl Toolbox {
         let vpath = VirtualPath::new(&require_str(args, "path")?)?;
         let search = require_str(args, "search_string")?;
         let replace = require_str(args, "replace_string")?;
-        self.reject_if_root_reserved(&vpath)?;
+        self.reject_if_root_reserved(&scope, &vpath)?;
         let region = self.storage.resolver().detect_region(&vpath);
         self.policy
             .gate_write(region)
@@ -1241,7 +1302,7 @@ impl Toolbox {
     fn delete_memory_note(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
         let scope = self.resolve_scope(args, &["path"])?;
         let vpath = VirtualPath::new(&require_str(args, "path")?)?;
-        self.reject_if_root_reserved(&vpath)?;
+        self.reject_if_root_reserved(&scope, &vpath)?;
         let resolver = self.storage.resolver();
         let region = resolver.detect_region(&vpath);
         self.policy
@@ -1271,8 +1332,8 @@ impl Toolbox {
 
         // --- Phase 1: validate and compute; no writes. ---
         // Core files are wrapper-managed on both ends.
-        self.reject_if_root_reserved(&vpath)?;
-        self.reject_if_root_reserved(&new_vpath)?;
+        self.reject_if_root_reserved(&scope, &vpath)?;
+        self.reject_if_root_reserved(&scope, &new_vpath)?;
 
         // Both the source's and the destination's region must be policy-writable.
         let src_region = resolver.detect_region(&vpath);
@@ -1348,6 +1409,13 @@ impl Toolbox {
             if referrer == vpath {
                 continue; // the moved note's own content is handled above
             }
+            // Incoming-link rewrites must not bypass the brief's CAS wrapper.
+            // Refuse before phase 2 so neither source nor destination changes.
+            if referrer == self.agents_vpath("AGENTS.md")?
+                || !resolver.is_agents_root_level(&referrer)
+            {
+                self.reject_if_root_reserved(&scope, &referrer)?;
+            }
             let r_physical = resolver.resolve(&scope, &referrer)?;
             let Ok(r_content) = self.storage.read(&r_physical) else {
                 continue; // unreadable notes cannot contain resolvable links
@@ -1414,7 +1482,7 @@ impl Toolbox {
         let scope = self.resolve_scope(args, &["path", "properties_json"])?;
         let vpath = VirtualPath::new(&require_str(args, "path")?)?;
         let updates = require_json_object(args, "properties_json")?;
-        self.reject_if_root_reserved(&vpath)?;
+        self.reject_if_root_reserved(&scope, &vpath)?;
         let region = self.storage.resolver().detect_region(&vpath);
         self.policy
             .gate_write(region)
@@ -1569,6 +1637,50 @@ impl Toolbox {
         // and expansion never changes the line count.
         let content = self.expand_links_for(scope, &vpath, content)?;
         Ok((vpath, content))
+    }
+
+    fn update_agents_file(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
+        let scope =
+            self.resolve_scope(args, &["content", "expected_version", "expected_absent"])?;
+        let content = require_str(args, "content")?;
+        let version = opt_str(args, "expected_version")?;
+        let absent = opt_bool(args, "expected_absent")?.unwrap_or(false);
+        let expected = match (version.as_deref(), absent) {
+            (None, true) => ExpectedState::Absent,
+            (Some(version), false) if !version.trim().is_empty() => ExpectedState::Version(version),
+            _ => {
+                return Err(MuninnError::InvalidArgument {
+                    message:
+                        "provide exactly one of nonempty expected_version or expected_absent=true"
+                            .to_string(),
+                });
+            }
+        };
+        const BYTE_CAP: usize = 65536;
+        if content.len() > BYTE_CAP {
+            return Err(MuninnError::InvalidArgument {
+                message: "AGENTS.md must not exceed 65536 UTF-8 bytes; file left unchanged"
+                    .to_string(),
+            });
+        }
+        let (vpath, content) =
+            self.prepare_evolve_content(&scope, "AGENTS.md", Some(200), &content)?;
+        if content.len() > BYTE_CAP {
+            return Err(MuninnError::InvalidArgument {
+                message:
+                    "expanded AGENTS.md must not exceed 65536 UTF-8 bytes; file left unchanged"
+                        .to_string(),
+            });
+        }
+        let mut result = self.gated_write(&scope, &vpath, |physical, storage| {
+            storage.write_conditional(physical, &content, expected)
+        })?;
+        let mut value = result
+            .structured_content
+            .take()
+            .expect("gated write returns structured content");
+        value["version"] = json!(content_version(content.as_bytes()));
+        Ok(ok_json(value))
     }
 
     fn update_task_heartbeat(&self, args: &JsonObject) -> Result<CallToolResult, MuninnError> {
@@ -2194,7 +2306,7 @@ fn build_tools(scheme: &Scheme, recall_enabled: bool) -> Vec<Tool> {
         ),
         tool(
             "read_memory_note",
-            "Read the UTF-8 contents of a single memory note by its virtual path. Optional `offset`/`limit` select a 1-based line range and add `total_lines` (the full note's line count) to the result. Set `backlinks` to also return the visible notes whose links resolve to it.",
+            "Read the UTF-8 contents of a single memory note by its virtual path. Optional `offset`/`limit` select a 1-based line range and add `total_lines` (the full note's line count) to the result. Set `backlinks` to also return the visible notes whose links resolve to it. Set `include_version` for an opaque version of the complete stored snapshot, usable with update_agents_file.",
             merge_schema(scheme, fields_schema::<ReadFields>()),
         ),
         tool(
@@ -2246,6 +2358,11 @@ fn build_tools(scheme: &Scheme, recall_enabled: bool) -> Vec<Tool> {
             "evolve_core_persona",
             "Atomically replace foundational session files (persona|prompt|rules|user|memory) via the single required argument `updates`: an array of 1–5 { which, content } entries (no duplicate `which`) — a single-file update is a one-element array. Every entry is validated as a unit before any write; the response always carries `results`, one { which, bytes_written } entry per update, in request order, even for a single entry. When bootstrapping missing foundational files, interview the user first (identity, role, working style, boundaries), distill the answers into your own concise wording, then commit all affected files in one batch call. Enforces caps: RULES.md ≤ 40 lines, USER.md ≤ 100 lines, MEMORY.md ≤ 200 lines.",
             merge_schema(scheme, fields_schema::<EvolveFields>()),
+        ),
+        tool(
+            "update_agents_file",
+            "Atomically replace the scope's AGENTS.md collaboration brief (200 lines, 65536 UTF-8 bytes). Supply exactly one of expected_version from a versioned read or expected_absent=true for creation. A stale state returns structured conflict without overwriting. Task progress belongs in HEARTBEAT.md.",
+            merge_schema(scheme, fields_schema::<BriefFields>()),
         ),
         tool(
             "update_task_heartbeat",

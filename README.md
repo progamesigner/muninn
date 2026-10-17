@@ -217,7 +217,7 @@ agents folder, there is no "outside" region, and wrapper tools resolve to
 | Tool | Purpose |
 |---|---|
 | `list_memory_notes` | Paginated listing of virtual paths visible to the scope (`limit` default 200, max 1000; opaque `cursor`; optional `path_prefix`). |
-| `read_memory_note` | Read a note by virtual path. |
+| `read_memory_note` | Read a note by virtual path. Optional `include_version: true` adds an opaque version of the full stored snapshot, composing with line ranges and backlinks. Default responses are unchanged. |
 | `read_memory_notes` | Read 1–20 notes in one call. Returns one `notes` entry per requested path, in request order: `{ path, content }` on success or `{ path, error: { code, message } }` on failure. Per-path semantics match `read_memory_note`; a per-path failure never fails the call (only malformed arguments do). |
 | `write_memory_note` | Atomic full-file write; returns the byte count. With `append: true`, `content` is appended verbatim instead (exact bytes, no separator; a missing note is created), serialised under the per-target lock; the byte count is the note's total size after the write. |
 | `edit_memory_note` | Atomic search/replace; the search string must occur exactly once. |
@@ -227,6 +227,7 @@ agents folder, there is no "outside" region, and wrapper tools resolve to
 | `update_note_properties` | Merge a JSON object into a note's frontmatter atomically under the per-target lock: each key is upserted with its JSON value, an explicit `null` deletes a key, and the body stays byte-identical. The block is created when absent, removed when the merge empties it, and re-serialized in normalized form (sorted keys; comments not preserved); a leading fence that is not valid YAML is refused with `invalid_argument`. The note must exist; write gating matches the generic write tools (root core files stay wrapper-only). Returns the full post-update `{ properties }`. |
 | `load_session_context` | Render the scope's session-context (see [Session context](#session-context)); returns `{ rendered, missing }`. |
 | `evolve_core_persona` | Atomically replace foundational files (`persona`/`prompt`/`rules`/`user`/`memory`) via the required `updates` array of 1–5 `{ which, content }` entries (no duplicate `which`); a single-file update is a one-element array. Validated as a unit before any write; the response always carries `results`, one `{ which, bytes_written }` entry per update. Enforces line caps: `USER.md` ≤ 100, `MEMORY.md` ≤ 200. |
+| `update_agents_file` | Conditional atomic replacement of the scoped collaboration brief `AGENTS.md` (200 lines, 65536 UTF-8 bytes). Supply `expected_version` from a versioned read or `expected_absent: true` for creation; returns `{ bytes_written, version }`. Mismatches return structured `conflict` without changing the file. |
 | `update_task_heartbeat` | Atomic write to `HEARTBEAT.md`. |
 | `append_diary_entry` | Append a timestamped section to `diary/<YYYY-MM-DD>.md`; a newly created file opens with a `# <YYYY-MM-DD>` H1, and an optional `title` makes the heading `## <HH:MM:SS> — <title>`. |
 | `recall_memory_notes` | Search notes by content within the caller's visible set; returns ranked `{ path, score (0–1), snippets, modified_at }`. `filters` (frontmatter properties) is a required argument — pass `[]` for none. Supply at least one of `query` (full-text), `regex`, a non-empty `filters`, or the `modified_after`/`modified_before` time bounds. Paginated like `list_memory_notes`. Present unless `MUNINN_RECALL_BACKEND=off`. |
@@ -278,11 +279,38 @@ ordering stands. The compared time is the filesystem mtime — restores and sync
 tools may carry old timestamps — and the behavior is identical on both backends.
 
 Inside the agents folder the root level is **wrapper-only**: the core files
-(`PERSONA.md`, `PROMPT.md`, `RULES.md`, `USER.md`, `MEMORY.md`, `HEARTBEAT.md`)
-are changed only through `evolve_core_persona` / `update_task_heartbeat`.
+(`PERSONA.md`, `PROMPT.md`, `RULES.md`, `USER.md`, `MEMORY.md`, `HEARTBEAT.md`, `AGENTS.md`)
+are changed only through their dedicated wrappers.
 `write_memory_note` / `edit_memory_note` / `delete_memory_note` may only target
 paths under a subfolder; a root-level target is rejected with `path_not_permitted`.
 Reads of root files remain allowed.
+
+#### Collaboration briefs
+
+`AGENTS.md` holds recent agreements, summaries, and links for one scope. Current
+tasks and progress belong in `HEARTBEAT.md`; detailed knowledge stays in canonical
+notes. The brief is optional and is not included in foundational session context
+or its onboarding missing-file list. Personal command templates live under
+`commands/<name>.md` relative to the agents folder.
+
+Read the brief using `read_memory_note` with `include_version: true`, then pass
+that exact version to `update_agents_file` with the complete replacement content.
+For an absent brief, pass `expected_absent: true` instead. Exactly one precondition
+is required. A conflict is an MCP error result with `code: "conflict"`; read again
+before deciding whether to retry. Generic writes, batch writes, edits, frontmatter
+updates, deletes, renames, and incoming-link rewrites cannot change the brief.
+The byte cap applies both before and after wikilink expansion.
+
+Versions identify stored bytes (SHA-256), not ordered revisions: identical content
+has an identical version, including after an A-to-B-to-A sequence. Comparison and
+replacement hold an OS advisory lock on a persistent hidden sidecar next to the
+resolved brief (for example `.AGENTS.jarvis.tony.md.cas-lock`). Never delete these
+sidecars while writers may run: replacing a lock inode breaks mutual exclusion.
+They contain no note content. Independent Muninn processes sharing a vault must
+use a filesystem supporting advisory locks and atomic rename; validate those
+semantics on the actual shared mount before deployment. External editors must
+cooperate with the lock to obtain transactional guarantees. Ordinary generic-note
+writes retain their existing last-writer-wins behavior across processes.
 
 #### Persistent recall index
 

@@ -260,7 +260,7 @@ expression: "schemas_for(\"<agent>.<user>\")"
     }
   },
   "read_memory_note": {
-    "description": "Read the UTF-8 contents of a single memory note by its virtual path. Optional `offset`/`limit` select a 1-based line range and add `total_lines` (the full note's line count) to the result. Set `backlinks` to also return the visible notes whose links resolve to it.",
+    "description": "Read the UTF-8 contents of a single memory note by its virtual path. Optional `offset`/`limit` select a 1-based line range and add `total_lines` (the full note's line count) to the result. Set `backlinks` to also return the visible notes whose links resolve to it. Set `include_version` for an opaque version of the complete stored snapshot, usable with update_agents_file.",
     "input_schema": {
       "additionalProperties": false,
       "properties": {
@@ -271,6 +271,13 @@ expression: "schemas_for(\"<agent>.<user>\")"
         },
         "backlinks": {
           "description": "When `true`, the structured result additionally carries a `backlinks`\narray: the clean virtual path of every visible note containing at least\none link that resolves to this note, deduplicated and sorted ascending.\nAbsent or `false` leaves the response unchanged.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "include_version": {
+          "description": "Include an opaque version of the complete stored bytes in the structured\nresult, before link stripping or line slicing. Absent or false preserves\nthe default response. Pass the version to update_agents_file.",
           "type": [
             "boolean",
             "null"
@@ -303,6 +310,7 @@ expression: "schemas_for(\"<agent>.<user>\")"
       "required": [
         "agent",
         "backlinks",
+        "include_version",
         "limit",
         "offset",
         "path",
@@ -434,6 +442,50 @@ expression: "schemas_for(\"<agent>.<user>\")"
         "agent",
         "new_path",
         "path",
+        "user"
+      ],
+      "type": "object"
+    }
+  },
+  "update_agents_file": {
+    "description": "Atomically replace the scope's AGENTS.md collaboration brief (200 lines, 65536 UTF-8 bytes). Supply exactly one of expected_version from a versioned read or expected_absent=true for creation. A stale state returns structured conflict without overwriting. Task progress belongs in HEARTBEAT.md.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "agent": {
+          "description": "Scope key 'agent' identifying the caller.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "content": {
+          "description": "Complete replacement collaboration brief: at most 200 lines and 65536\nUTF-8 bytes, including after wikilink expansion. Tasks belong in HEARTBEAT.",
+          "type": "string"
+        },
+        "expected_absent": {
+          "description": "True only when creating a brief previously observed to be absent. An\nexisting brief causes conflict; never falls back to unconditional overwrite.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "expected_version": {
+          "description": "Version returned by a read with include_version=true, or null for initial\ncreation. Exactly one of a nonempty version or expected_absent=true is required.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user": {
+          "description": "Scope key 'user' identifying the caller.",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent",
+        "content",
+        "expected_absent",
+        "expected_version",
         "user"
       ],
       "type": "object"
