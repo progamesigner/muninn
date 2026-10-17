@@ -23,6 +23,7 @@ pub enum ErrorCode {
     ScopeDenied,
     NotFound,
     DestinationExists,
+    Conflict,
     EditSearchNotFound,
     EditSearchAmbiguous,
     InvalidArgument,
@@ -42,6 +43,7 @@ impl ErrorCode {
             ErrorCode::ScopeDenied => "scope_denied",
             ErrorCode::NotFound => "not_found",
             ErrorCode::DestinationExists => "destination_exists",
+            ErrorCode::Conflict => "conflict",
             ErrorCode::EditSearchNotFound => "edit_search_not_found",
             ErrorCode::EditSearchAmbiguous => "edit_search_ambiguous",
             ErrorCode::InvalidArgument => "invalid_argument",
@@ -105,6 +107,11 @@ pub enum MuninnError {
     #[error("destination '{virtual_path}' already exists; pick another name")]
     DestinationExists { virtual_path: String },
 
+    #[error(
+        "brief update conflict: the expected state no longer matches; read the brief again before retrying"
+    )]
+    Conflict,
+
     #[error("edit failed: the search string was not found in the target file")]
     EditSearchNotFound,
 
@@ -149,6 +156,7 @@ impl MuninnError {
             MuninnError::ScopeDenied { .. } => ErrorCode::ScopeDenied,
             MuninnError::NotFound { .. } => ErrorCode::NotFound,
             MuninnError::DestinationExists { .. } => ErrorCode::DestinationExists,
+            MuninnError::Conflict => ErrorCode::Conflict,
             MuninnError::EditSearchNotFound => ErrorCode::EditSearchNotFound,
             MuninnError::EditSearchAmbiguous { .. } => ErrorCode::EditSearchAmbiguous,
             MuninnError::InvalidArgument { .. } => ErrorCode::InvalidArgument,
@@ -222,6 +230,7 @@ mod tests {
         assert_eq!(ErrorCode::ScopeDenied.as_str(), "scope_denied");
         assert_eq!(ErrorCode::NotFound.as_str(), "not_found");
         assert_eq!(ErrorCode::DestinationExists.as_str(), "destination_exists");
+        assert_eq!(ErrorCode::Conflict.as_str(), "conflict");
         assert_eq!(
             ErrorCode::EditSearchNotFound.as_str(),
             "edit_search_not_found"

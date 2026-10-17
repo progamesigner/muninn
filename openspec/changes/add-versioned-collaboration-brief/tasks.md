@@ -2,7 +2,7 @@
 
 ## 1. Conditional storage
 
-- [ ] 1.1 Add content versions, structured conflicts, and cross-process locked atomic replacement; verify independent-process update and creation races and unchanged content on conflicts.
+- [x] 1.1 Add content versions, structured conflicts, and cross-process locked atomic replacement; verify independent-process update and creation races and unchanged content on conflicts.
 - [ ] 1.2 Document content identity, lock lifetime, and supported filesystem assumptions next to storage and in operator docs; verify no unconditional CAS fallback exists.
 
 ## 2. Managed brief surface
