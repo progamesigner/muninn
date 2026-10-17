@@ -1,7 +1,11 @@
 # container-image Specification
 
 ## Purpose
-TBD - created by archiving change add-container-image-release. Update Purpose after archive.
+Package Muninn as a minimal, nonroot container containing a statically linked
+binary, with HTTP serving and a mounted vault. Define multi-stage
+build inputs, multi-architecture release publication to GitHub Container Registry,
+release tags, OCI metadata, and external health probing.
+
 ## Requirements
 ### Requirement: Minimal static container image
 

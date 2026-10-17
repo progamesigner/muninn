@@ -1,7 +1,11 @@
 # context-http-api Specification
 
 ## Purpose
-TBD - created by archiving change add-context-http-endpoint. Update Purpose after archive.
+Provide stateless, read-only HTTP access to per-scope session context, lean
+bootstrap, and vault layout guidance for clients that need rendered Markdown or
+JSON without an MCP exchange. Reuse the shared renderers and HTTP authentication
+and scope authorization, and expose unauthenticated liveness and readiness probes.
+
 ## Requirements
 ### Requirement: Versioned context endpoint
 The system SHALL serve a stateless, read-only HTTP route `GET /v1/context` on the
