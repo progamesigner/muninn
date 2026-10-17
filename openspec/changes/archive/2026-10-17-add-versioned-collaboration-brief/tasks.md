@@ -13,5 +13,5 @@
 ## 3. Huginn integration and completion
 
 - [x] 3.1 Preserve structured MCP metadata/errors and request read versions in Huginn; verify regression tests and disposable local-server E2E including conflicting writers.
-- [ ] 3.2 Run repository format, lint, compile/type, architectural, and test checks in both worktrees; record results, complete and archive OpenSpec, and verify signed commits.
-- [ ] 3.3 Push only feat/m7-briefs and feat/m7 and update Agents M7 progress with commits, checks, and deployment limitations; verify remote branch heads and note contents.
+- [x] 3.2 Run repository format, lint, compile/type, architectural, and test checks in both worktrees; record results, complete and archive OpenSpec, and verify signed commits.
+- [x] 3.3 Push only feat/m7-briefs and feat/m7 and update Agents M7 progress with commits, checks, and deployment limitations; verify remote branch heads and note contents.
