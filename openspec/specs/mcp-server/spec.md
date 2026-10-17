@@ -1,7 +1,11 @@
 # mcp-server Specification
 
 ## Purpose
-TBD - created by archiving change build-agentmem-mcp-server. Update Purpose after archive.
+Expose Muninn's memory tools, session resources, and session-context prompt
+through a Rust MCP server over stdio or stateless Streamable HTTP. Define server
+lifecycle, capability discovery, tool schemas, error reporting, nonblocking
+dispatch, and HTTP authentication and scope authorization for client access.
+
 ## Requirements
 ### Requirement: Server binary lifecycle
 The system SHALL ship a single Rust binary `muninn` that, on launch, reads configuration from the environment, initialises logging to the correct sink for the selected transport, registers all tools with the `rmcp` server, and begins serving requests until terminated by a signal.
