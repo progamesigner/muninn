@@ -1,7 +1,11 @@
 # configuration Specification
 
 ## Purpose
-TBD - created by archiving change build-agentmem-mcp-server. Update Purpose after archive.
+Define Muninn's environment-driven startup configuration, with optional CLI
+overrides and validation, so operators can control vault layout, scope isolation,
+access policy, session templates, transports, recall, visibility, timezone, and
+logging with documented defaults.
+
 ## Requirements
 ### Requirement: Configuration source
 The system SHALL be configured exclusively via environment variables. CLI flags MAY be accepted as overrides, but the canonical configuration surface is the environment.

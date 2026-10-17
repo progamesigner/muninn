@@ -1,7 +1,11 @@
 # vault-storage Specification
 
 ## Purpose
-TBD - created by archiving change build-agentmem-mcp-server. Update Purpose after archive.
+Store agent memory in a plain-Markdown vault through root-contained virtual paths,
+mapping each scope to its own directory and filename suffix. Enforce access policy
+and visibility across notes, links, and recall results, and preserve file integrity
+with atomic writes and unambiguous edits.
+
 ## Requirements
 ### Requirement: Vault root containment
 The system SHALL canonicalise every virtual path against the configured vault root and SHALL reject any resolution whose canonical absolute path is not a descendant of that root.

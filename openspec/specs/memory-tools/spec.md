@@ -1,7 +1,11 @@
 # memory-tools Specification
 
 ## Purpose
-TBD - created by archiving change build-agentmem-mcp-server. Update Purpose after archive.
+Provide scope-aware tools for agents to discover, recall, read, and maintain
+durable Markdown memory, including batch operations and note properties. Define
+the dedicated wrappers for foundational files, heartbeat, and diary entries, and
+the shared rendering of session context, lean bootstrap, and vault layout guidance.
+
 ## Requirements
 ### Requirement: `list_memory_notes` tool
 The system SHALL expose a `list_memory_notes` tool that returns a paginated set of virtual paths visible to a given scope, including both inside-agents-folder files belonging to that scope and outside-agents-folder files reachable under the active policy. The tool SHALL accept an optional `glob` argument that filters the visible set to entries whose clean, vault-root-relative virtual path matches the glob pattern; `glob` is applied as an in-memory filter over visible paths and SHALL NOT read note contents. When both `path_prefix` and `glob` are supplied, an entry SHALL be returned only if it satisfies both. An invalid glob pattern SHALL be rejected with `invalid_argument`. The tool SHALL accept an optional `order` argument selecting the result ordering by clean virtual path: `name_asc` (the default) or `name_desc`. Ordering SHALL be applied before pagination so `limit`/`cursor` page over the ordered set, and SHALL remain deterministic across calls with identical arguments. An unrecognized `order` value SHALL be rejected with `invalid_argument`. The tool SHALL accept an optional `view` argument selecting what the items represent: `files` (the default) returns individual note virtual paths; `dirs` returns the distinct directory virtual paths derived from the visible set — the deduplicated set of every ancestor directory of a visible note. The `dirs` view SHALL be derived purely from the visible paths without reading note contents, SHALL honor the `path_prefix` filter and pagination, and SHALL preserve deterministic ordering. An unrecognized `view` value SHALL be rejected with `invalid_argument`.
