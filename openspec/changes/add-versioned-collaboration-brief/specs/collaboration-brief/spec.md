@@ -42,7 +42,7 @@ Comparison of expected state and replacement SHALL be serialized across independ
 - **THEN** exactly one succeeds and the other returns `conflict`
 
 ### Requirement: Managed brief boundaries
-Generic write, append, batch write, edit, delete, frontmatter update, and rename SHALL NOT mutate the managed brief. A rename requiring an incoming-link rewrite of the brief SHALL fail before any mutation. Root reservation errors for the brief SHALL name `update_agents_file`. The brief SHALL NOT become a sixth foundational context file, missing-file requirement, or onboarding prompt. The default layout SHALL document its bounds, conditional wrapper, distinction from heartbeat, and `commands/<name>.md` convention.
+Generic write, append, batch write, edit, delete, frontmatter update, and rename SHALL NOT mutate the managed brief, including through an in-vault directory alias. A rename requiring an incoming-link rewrite of the brief SHALL fail before any mutation. Root reservation errors for the brief SHALL name `update_agents_file`. The brief SHALL NOT become a sixth foundational context file, missing-file requirement, or onboarding prompt. The default layout SHALL document its bounds, conditional wrapper, distinction from heartbeat, and `commands/<name>.md` convention.
 
 #### Scenario: Generic mutation cannot bypass the wrapper
 - **WHEN** a caller targets the brief through a generic mutation or renames a note referenced by the brief

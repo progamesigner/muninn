@@ -4872,3 +4872,338 @@ fn shared_region_write_updates_backlinks() {
     ));
     assert_eq!(body["backlinks"], json!(["Actions/release.md"]));
 }
+
+// --- collaboration brief ---
+
+fn brief_update(
+    tb: &Toolbox,
+    content: &str,
+    version: Option<&str>,
+) -> Result<CallToolResult, MuninnError> {
+    call(
+        tb,
+        "update_agents_file",
+        json!({"agent":"jarvis", "user":"tony", "content":content, "expected_version":version, "expected_absent":version.is_none()}),
+    )
+}
+
+#[test]
+fn brief_versions_round_trip_and_conflicts_are_structured_errors() {
+    let tmp = TempDir::new().unwrap();
+    let tb = default_tb(&tmp);
+    let created = structured(brief_update(&tb, "first\nsecond\n", None));
+    assert_eq!(created["bytes_written"], 13);
+    let version = created["version"].as_str().unwrap();
+    let read = structured(call(
+        &tb,
+        "read_memory_note",
+        json!({"agent":"jarvis", "user":"tony", "path":"Agents/AGENTS.md", "include_version":true, "offset":2, "limit":1, "backlinks":true}),
+    ));
+    assert_eq!(read["content"], "second\n");
+    assert_eq!(read["version"], version);
+    assert_eq!(read["total_lines"], 2);
+    assert_eq!(read["backlinks"], json!([]));
+    let normal = structured(call(
+        &tb,
+        "read_memory_note",
+        json!({"agent":"jarvis", "user":"tony", "path":"Agents/AGENTS.md"}),
+    ));
+    assert_eq!(normal, json!({"content":"first\nsecond\n"}));
+    let updated = structured(brief_update(&tb, "replacement", Some(version)));
+    assert_ne!(updated["version"], version);
+    for result in [
+        brief_update(&tb, "lost", Some(version)),
+        brief_update(&tb, "lost", None),
+    ] {
+        let error = result.unwrap_err().into_tool_result();
+        assert_eq!(error.is_error, Some(true));
+        assert_eq!(error.structured_content.unwrap()["code"], "conflict");
+    }
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("Agents/jarvis.tony/AGENTS.jarvis.tony.md"))
+            .unwrap(),
+        "replacement"
+    );
+}
+
+#[test]
+fn brief_preconditions_are_required_and_unambiguous() {
+    let tmp = TempDir::new().unwrap();
+    let tb = default_tb(&tmp);
+    for precondition in [
+        json!({}),
+        json!({"expected_version":null}),
+        json!({"expected_absent":false}),
+        json!({"expected_version":""}),
+        json!({"expected_version":"  "}),
+        json!({"expected_version":"v1", "expected_absent":true}),
+        json!({"expected_absent":"true"}),
+        json!({"expected_version":7}),
+    ] {
+        let mut args = json!({"agent":"jarvis", "user":"tony", "content":"lost"});
+        args.as_object_mut()
+            .unwrap()
+            .extend(precondition.as_object().unwrap().clone());
+        assert_code(call(&tb, "update_agents_file", args), "invalid_argument");
+    }
+    assert_code(brief_update(&tb, "lost", Some("v1")), "conflict");
+    assert!(
+        !tmp.path()
+            .join("Agents/jarvis.tony/AGENTS.jarvis.tony.md")
+            .exists()
+    );
+}
+
+#[test]
+fn brief_bounds_count_utf8_and_preserve_the_existing_file() {
+    let tmp = TempDir::new().unwrap();
+    let tb = default_tb(&tmp);
+    let created = structured(brief_update(&tb, &"x\n".repeat(200), None));
+    let version = created["version"].as_str().unwrap();
+    for content in ["x\n".repeat(201), "字".repeat(21846)] {
+        assert_code(
+            brief_update(&tb, &content, Some(version)),
+            "invalid_argument",
+        );
+    }
+    let content = "x".repeat(65536);
+    let updated = structured(brief_update(&tb, &content, Some(version)));
+    assert_eq!(updated["bytes_written"], 65536);
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("Agents/jarvis.tony/AGENTS.jarvis.tony.md"))
+            .unwrap(),
+        content
+    );
+}
+
+#[test]
+fn brief_wikilinks_version_the_stored_snapshot_and_update_indexes() {
+    let tmp = TempDir::new().unwrap();
+    let tb = recall_toolbox(&tmp);
+    call(&tb, "write_memory_note", json!({"agent":"jarvis","user":"tony","path":"Agents/topics/decision.md","content":"a decision"})).unwrap();
+    let created = structured(brief_update(&tb, "confirmed [[decision]]", None));
+    let stored =
+        std::fs::read_to_string(tmp.path().join("Agents/jarvis.tony/AGENTS.jarvis.tony.md"))
+            .unwrap();
+    assert!(stored.contains("decision.jarvis.tony"));
+    assert_eq!(
+        created["version"],
+        muninn::storage::content_version(stored.as_bytes())
+    );
+    let read = structured(call(
+        &tb,
+        "read_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/AGENTS.md","include_version":true}),
+    ));
+    assert_eq!(read["content"], "confirmed [[decision]]");
+    assert_eq!(read["version"], created["version"]);
+    let backlinks = structured(call(
+        &tb,
+        "read_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/topics/decision.md","backlinks":true}),
+    ));
+    assert_eq!(backlinks["backlinks"], json!(["Agents/AGENTS.md"]));
+    let recall = structured(call(
+        &tb,
+        "recall_memory_notes",
+        json!({"agent":"jarvis","user":"tony","query":"confirmed", "filters":[]}),
+    ));
+    assert!(recall.to_string().contains("Agents/AGENTS.md"));
+    structured(brief_update(&tb, "removed", created["version"].as_str()));
+    let backlinks = structured(call(
+        &tb,
+        "read_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/topics/decision.md","backlinks":true}),
+    ));
+    assert_eq!(backlinks["backlinks"], json!([]));
+}
+
+#[test]
+fn brief_expanded_byte_cap_is_checked_before_persisting() {
+    let tmp = TempDir::new().unwrap();
+    let tb = default_tb(&tmp);
+    call(
+        &tb,
+        "write_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/topics/a.md","content":"target"}),
+    )
+    .unwrap();
+    let content = format!("{}[[topics/a]]", "x".repeat(65520));
+    assert!(content.len() <= 65536);
+    assert_code(brief_update(&tb, &content, None), "invalid_argument");
+    assert!(
+        !tmp.path()
+            .join("Agents/jarvis.tony/AGENTS.jarvis.tony.md")
+            .exists()
+    );
+}
+
+#[test]
+fn brief_obeys_scope_grants_policy_visibility_and_configured_agents_folder() {
+    let tmp = TempDir::new().unwrap();
+    let readonly = toolbox(&tmp, "Agents", "<agent>.<user>", Policy::Readonly);
+    assert_code(brief_update(&readonly, "lost", None), "write_denied");
+    let tb = default_tb(&tmp);
+    assert_code(
+        call(
+            &tb,
+            "update_agents_file",
+            json!({"agent":"jarvis", "content":"lost", "expected_absent":true}),
+        ),
+        "missing_scope",
+    );
+    assert_code(
+        call(
+            &tb,
+            "update_agents_file",
+            json!({"agent":"jarvis","user":"tony","path":"Agents/elsewhere.md","content":"lost","expected_absent":true}),
+        ),
+        "invalid_argument",
+    );
+    let grant = Grant::Entries(Arc::new(vec![]));
+    let args = json!({"agent":"jarvis","user":"tony","content":"lost","expected_absent":true});
+    assert_code(
+        tb.call("update_agents_file", args.as_object().unwrap(), &grant)
+            .unwrap(),
+        "scope_denied",
+    );
+    write_outside(&tmp, ".ignore", "Agents/**/AGENTS.*.md\n");
+    assert_code(brief_update(&tb, "lost", None), "path_not_permitted");
+    let tmp = TempDir::new().unwrap();
+    let tb = toolbox(&tmp, "", "", Policy::Namespaced);
+    structured(call(
+        &tb,
+        "update_agents_file",
+        json!({"content":"root brief","expected_absent":true}),
+    ));
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("AGENTS.md")).unwrap(),
+        "root brief"
+    );
+}
+
+#[test]
+fn brief_generic_mutations_and_indirect_rename_are_refused_before_writes() {
+    let tmp = TempDir::new().unwrap();
+    let tb = default_tb(&tmp);
+    call(&tb, "write_memory_note", json!({"agent":"jarvis","user":"tony","path":"Agents/topics/decision.md","content":"decision"})).unwrap();
+    structured(brief_update(&tb, "[[topics/decision]]", None));
+    for (tool, fields) in [
+        (
+            "write_memory_note",
+            json!({"path":"Agents/AGENTS.md","content":"lost"}),
+        ),
+        (
+            "write_memory_note",
+            json!({"path":"Agents/AGENTS.md","content":"lost","append":true}),
+        ),
+        (
+            "write_memory_notes",
+            json!({"notes":[{"path":"Agents/topics/untouched.md","content":"lost"},{"path":"Agents/AGENTS.md","content":"lost"}]}),
+        ),
+        (
+            "edit_memory_note",
+            json!({"path":"Agents/AGENTS.md","search_string":"decision","replace_string":"lost"}),
+        ),
+        ("delete_memory_note", json!({"path":"Agents/AGENTS.md"})),
+        (
+            "update_note_properties",
+            json!({"path":"Agents/AGENTS.md","properties_json":"{}"}),
+        ),
+        (
+            "rename_memory_note",
+            json!({"path":"Agents/AGENTS.md","new_path":"Agents/topics/moved.md"}),
+        ),
+        (
+            "rename_memory_note",
+            json!({"path":"Agents/topics/decision.md","new_path":"Agents/AGENTS.md"}),
+        ),
+        (
+            "rename_memory_note",
+            json!({"path":"Agents/topics/decision.md","new_path":"Agents/topics/moved.md"}),
+        ),
+    ] {
+        let mut args = json!({"agent":"jarvis","user":"tony"});
+        args.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        let err = call(&tb, tool, args).unwrap_err();
+        assert_eq!(err.code().as_str(), "path_not_permitted", "{tool}: {err}");
+        assert!(err.to_string().contains("update_agents_file"));
+    }
+    assert!(
+        tmp.path()
+            .join("Agents/jarvis.tony/topics/decision.jarvis.tony.md")
+            .is_file()
+    );
+    assert!(
+        !tmp.path()
+            .join("Agents/jarvis.tony/topics/moved.jarvis.tony.md")
+            .exists()
+    );
+    assert!(
+        !tmp.path()
+            .join("Agents/jarvis.tony/topics/untouched.jarvis.tony.md")
+            .exists()
+    );
+    let brief = structured(call(
+        &tb,
+        "read_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/AGENTS.md"}),
+    ));
+    assert_eq!(brief["content"], "[[decision]]");
+}
+
+#[test]
+fn brief_remains_optional_and_scope_isolated() {
+    let tmp = TempDir::new().unwrap();
+    let tb = default_tb(&tmp);
+    let args = json!({"agent":"jarvis","user":"tony"});
+    let before = structured(call(&tb, "load_session_context", args.clone()));
+    structured(brief_update(&tb, "private brief marker", None));
+    let after = structured(call(&tb, "load_session_context", args));
+    assert_eq!(before, after);
+    assert_eq!(after["missing"].as_array().unwrap().len(), 5);
+    assert!(
+        !after["rendered"]
+            .as_str()
+            .unwrap()
+            .contains("private brief marker")
+    );
+    assert_code(
+        call(
+            &tb,
+            "read_memory_note",
+            json!({"agent":"jarvis","user":"sam","path":"Agents/AGENTS.md","include_version":true}),
+        ),
+        "not_found",
+    );
+    let listed = structured(call(
+        &tb,
+        "list_memory_notes",
+        json!({"agent":"jarvis","user":"tony"}),
+    ));
+    assert_eq!(listed["items"], json!(["Agents/AGENTS.md"]));
+}
+
+#[cfg(unix)]
+#[test]
+fn brief_directory_alias_cannot_bypass_conditional_updates() {
+    let tmp = TempDir::new().unwrap();
+    let tb = default_tb(&tmp);
+    structured(brief_update(&tb, "protected", None));
+    let scope_root = tmp.path().join("Agents/jarvis.tony");
+    std::os::unix::fs::symlink(&scope_root, scope_root.join("alias")).unwrap();
+    assert_code(
+        call(
+            &tb,
+            "write_memory_note",
+            json!({"agent":"jarvis","user":"tony","path":"Agents/alias/AGENTS.md","content":"lost"}),
+        ),
+        "path_not_permitted",
+    );
+    assert_eq!(
+        std::fs::read_to_string(scope_root.join("AGENTS.jarvis.tony.md")).unwrap(),
+        "protected"
+    );
+}
