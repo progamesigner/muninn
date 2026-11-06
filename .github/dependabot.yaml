@@ -33,10 +33,8 @@ updates:
       - minor
       - patch
 
-# The Dockerfile's builder base image (messense/cargo-zigbuild). This is the
-# pin that silently went stale and broke the arm64 leg of v1.1.2 when a new
-# Rust stable started emitting a linker argument the older zig could not
-# handle, so it is worth watching on its own.
+# The Dockerfile's builder base image (rust:*-alpine). A stale builder pin
+# once broke the arm64 leg of v1.1.2, so it is worth watching on its own.
 - package-ecosystem: docker
   directory: /
   schedule:

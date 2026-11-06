@@ -14,7 +14,7 @@ env:
 jobs:
   check:
     name: fmt + clippy + test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -60,7 +60,7 @@ jobs:
         - x86_64-pc-windows-msvc
         include:
         - target: x86_64-unknown-linux-gnu
-          os: ubuntu-latest
+          os: ubuntu-26.04
         - target: aarch64-apple-darwin
           os: macos-latest
         - target: x86_64-pc-windows-msvc
@@ -88,20 +88,28 @@ jobs:
           target/${{ matrix.target }}/release/muninn.exe
         if-no-files-found: ignore
 
-  publish-image:
-    name: publish container image
+  # Each arch builds on its own native runner (no QEMU, no cross linker),
+  # smoke-tests the image it just built, then pushes it by digest only. The
+  # merge job below stitches the digests into one multi-arch tag set, so no tag
+  # moves unless every arch passed its smoke test.
+  build-image:
+    name: build image linux/${{ matrix.arch }}
     if: startsWith(github.ref, 'refs/tags/')
     needs: check
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+        - arch: amd64
+          runner: ubuntu-26.04
+        - arch: arm64
+          runner: ubuntu-26.04-arm
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-    # QEMU lets the amd64 runner boot the arm64 image for its smoke test.
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -121,7 +129,98 @@ jobs:
         echo "IMAGE_AUTHORS=$(echo "$meta" | jq -r '.packages[0].authors | join(", ")')" >> "$GITHUB_ENV"
         echo "IMAGE_DOCUMENTATION=$(echo "$meta" | jq -r '.packages[0].documentation')" >> "$GITHUB_ENV"
 
-    - name: Compute tags and labels
+    - name: Compute labels
+      id: meta
+      uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+      with:
+        images: ghcr.io/progamesigner/muninn
+        labels: |
+          org.opencontainers.image.authors=${{ env.IMAGE_AUTHORS }}
+          org.opencontainers.image.documentation=${{ env.IMAGE_DOCUMENTATION }}
+          org.opencontainers.image.vendor=progamesigner
+
+    - name: Build image for smoke test
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      with:
+        context: .
+        build-args: |
+          CARGO_FEATURES=recall-tantivy
+          MUNINN_RECALL_BACKEND=tantivy
+        platforms: linux/${{ matrix.arch }}
+        load: true
+        tags: muninn:smoke
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha,scope=image-${{ matrix.arch }}
+        cache-to: type=gha,mode=max,scope=image-${{ matrix.arch }}
+
+    - name: Smoke test the health endpoint
+      run: |
+        set -e
+        docker run -d --name smoke -p 8000:8000 muninn:smoke
+        ok=0
+        for _ in $(seq 1 30); do
+          if curl -fsS http://127.0.0.1:8000/healthz; then ok=1; break; fi
+          sleep 1
+        done
+        docker logs smoke
+        docker rm -f smoke
+        if [ "$ok" != "1" ]; then echo "smoke test failed on linux/${{ matrix.arch }}"; exit 1; fi
+
+    # Same inputs as the smoke build, so this is served from the build cache.
+    - name: Push image by digest
+      id: push
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      with:
+        context: .
+        build-args: |
+          CARGO_FEATURES=recall-tantivy
+          MUNINN_RECALL_BACKEND=tantivy
+        platforms: linux/${{ matrix.arch }}
+        labels: ${{ steps.meta.outputs.labels }}
+        outputs: type=image,name=ghcr.io/progamesigner/muninn,push-by-digest=true,name-canonical=true,push=true
+        cache-from: type=gha,scope=image-${{ matrix.arch }}
+
+    - name: Export digest
+      run: |
+        mkdir -p "$RUNNER_TEMP/digests"
+        digest="${{ steps.push.outputs.digest }}"
+        touch "$RUNNER_TEMP/digests/${digest#sha256:}"
+
+    - name: Upload digest
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: digests-${{ matrix.arch }}
+        path: ${{ runner.temp }}/digests/*
+        if-no-files-found: error
+        retention-days: 1
+
+  publish-image:
+    name: publish multi-arch image
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build-image
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+    - name: Download digests
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        path: ${{ runner.temp }}/digests
+        pattern: digests-*
+        merge-multiple: true
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Compute tags
       id: meta
       uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
       with:
@@ -130,66 +229,15 @@ jobs:
           type=semver,pattern={{version}}
           type=raw,value=latest
           type=sha,prefix=sha-
-        labels: |
-          org.opencontainers.image.authors=${{ env.IMAGE_AUTHORS }}
-          org.opencontainers.image.documentation=${{ env.IMAGE_DOCUMENTATION }}
-          org.opencontainers.image.vendor=progamesigner
 
-    # Build every published arch and smoke-test each before any push is trusted.
-    # --load only accepts one platform per call, so build them separately.
-    - name: Build amd64 image for smoke test
-      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-      with:
-        context: .
-        build-args: |
-          CARGO_FEATURES=recall-tantivy
-          MUNINN_RECALL_BACKEND=tantivy
-        platforms: linux/amd64
-        load: true
-        tags: muninn:smoke-amd64
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-    - name: Build arm64 image for smoke test
-      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-      with:
-        context: .
-        build-args: |
-          CARGO_FEATURES=recall-tantivy
-          MUNINN_RECALL_BACKEND=tantivy
-        platforms: linux/arm64
-        load: true
-        tags: muninn:smoke-arm64
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-    - name: Smoke test the health endpoint on every arch
+    - name: Create and push the multi-arch manifest
+      working-directory: ${{ runner.temp }}/digests
       run: |
-        set -e
-        for arch in amd64 arm64; do
-          echo "::group::smoke linux/$arch"
-          docker run -d --name "smoke-$arch" -p 8000:8000 "muninn:smoke-$arch"
-          ok=0
-          for _ in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8000/healthz; then ok=1; break; fi
-            sleep 1
-          done
-          docker logs "smoke-$arch"
-          docker rm -f "smoke-$arch"
-          echo "::endgroup::"
-          if [ "$ok" != "1" ]; then echo "smoke test failed on linux/$arch"; exit 1; fi
-        done
+        # Word splitting is intended: each jq/printf result is a list of args.
+        # shellcheck disable=SC2046
+        docker buildx imagetools create \
+          $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+          $(printf 'ghcr.io/progamesigner/muninn@sha256:%s ' *)
 
-    - name: Build and push multi-arch image
-      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-      with:
-        context: .
-        build-args: |
-          CARGO_FEATURES=recall-tantivy
-          MUNINN_RECALL_BACKEND=tantivy
-        platforms: linux/amd64,linux/arm64
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+    - name: Inspect the published image
+      run: docker buildx imagetools inspect "ghcr.io/progamesigner/muninn:${{ steps.meta.outputs.version }}"

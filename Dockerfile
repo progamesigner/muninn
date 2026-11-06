@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1
 
 # ---- builder ----------------------------------------------------------------
-# Rust + zig + cargo-zigbuild in one image. Pinned to the *build* platform so
-# the arm64 artifact is cross-compiled on the native runner rather than built
-# under slow QEMU emulation. cargo-zigbuild links musl targets via zig.
-FROM --platform=$BUILDPLATFORM messense/cargo-zigbuild:0.23.4 AS builder
+# Alpine's Rust image is musl-native, so a plain `cargo build` emits a static
+# binary with no cross linker. The builder runs on the target platform itself:
+# CI builds each arch on a native runner (amd64 and arm64), never under QEMU.
+FROM rust:1.99.1-alpine AS builder
 
 # Docker sets TARGETARCH to the architecture currently being assembled.
 ARG TARGETARCH
@@ -19,7 +19,8 @@ RUN case "$TARGETARCH" in \
         *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac
 
-# Add the musl target to the toolchain selected by rust-toolchain.toml.
+# Make sure the toolchain selected by rust-toolchain.toml has the musl target.
+# On Alpine this is the host target, so it is normally already installed.
 COPY rust-toolchain.toml ./
 RUN rustup target add "$(cat /tmp/triple)"
 
@@ -38,7 +39,7 @@ COPY benches ./benches
 ARG CARGO_FEATURES=""
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo zigbuild --release --target "$(cat /tmp/triple)" \
+    cargo build --release --target "$(cat /tmp/triple)" \
         ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} \
  && cp "target/$(cat /tmp/triple)/release/muninn" /muninn \
  && mkdir -p /vault
