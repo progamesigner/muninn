@@ -27,7 +27,11 @@ use crate::policy::Region;
 /// Content identity for an exact on-disk snapshot, before any read transforms.
 /// Identical bytes intentionally share a version; this is not a revision counter.
 pub fn content_version(content: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(content))
+    let hex: String = Sha256::digest(content)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("sha256:{hex}")
 }
 
 /// A conditional write has exactly one precondition; there is no overwrite mode.

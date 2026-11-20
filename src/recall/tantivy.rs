@@ -54,7 +54,10 @@ fn schema() -> Schema {
     // `path`: stored clean virtual path, and the unique key for upsert/delete. Also
     // a fast (columnar) field, so manifest recovery can read every path without
     // touching the document store — see `recover_manifest`.
-    builder.add_text_field("path", (STRING | STORED).set_fast(None));
+    builder.add_text_field(
+        "path",
+        (STRING | STORED).set_fast(tantivy::tokenizer::RAW_TOKENIZER_NAME),
+    );
     // `path_text`: the same clean path, tokenized so `query`/`regex` match it
     // like the body (the `path` STRING field stays the exact upsert/delete key).
     builder.add_text_field("path_text", TEXT);
