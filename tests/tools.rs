@@ -146,12 +146,23 @@ fn frozen_toolbox_policy(tmp: &TempDir, backend: RecallBackendKind, policy: Poli
 }
 
 fn toolbox(tmp: &TempDir, agents: &str, scheme: &str, policy: Policy) -> Toolbox {
+    toolbox_prune(tmp, agents, scheme, policy, true)
+}
+
+/// [`toolbox`] with empty-folder cleanup set explicitly.
+fn toolbox_prune(
+    tmp: &TempDir,
+    agents: &str,
+    scheme: &str,
+    policy: Policy,
+    prune: bool,
+) -> Toolbox {
     let resolver = PathResolver::new(
         tmp.path().canonicalize().unwrap(),
         Utf8PathBuf::from(agents),
         Scheme::parse(scheme).unwrap(),
     );
-    let storage = Storage::new(resolver, true, false, &[]);
+    let storage = Storage::new(resolver, true, false, &[]).with_prune_empty_dirs(prune);
     Toolbox::new(
         storage,
         policy,
@@ -1609,6 +1620,7 @@ fn rename_rewrites_wikilink_and_markdown_referrers() {
             "path": "Agents/topics/rust.md",
             "new_path": "Agents/topics/rust-lang.md",
             "notes_rewritten": 2,
+            "removed_dirs": [],
         })
     );
 
@@ -5206,4 +5218,166 @@ fn brief_directory_alias_cannot_bypass_conditional_updates() {
         std::fs::read_to_string(scope_root.join("AGENTS.jarvis.tony.md")).unwrap(),
         "protected"
     );
+}
+
+fn write_note(tb: &Toolbox, path: &str) {
+    call(
+        tb,
+        "write_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":path,"content":"x"}),
+    )
+    .unwrap();
+}
+
+fn delete_note(tb: &Toolbox, path: &str) -> Value {
+    structured(call(
+        tb,
+        "delete_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":path}),
+    ))
+}
+
+#[test]
+fn delete_last_note_removes_emptied_folders() {
+    let tmp = TempDir::new().unwrap();
+    let tb = default_tb(&tmp);
+    write_note(&tb, "Agents/projects/old/notes.md");
+    let body = delete_note(&tb, "Agents/projects/old/notes.md");
+    assert_eq!(
+        body,
+        json!({"deleted": true, "removed_dirs": ["Agents/projects/old", "Agents/projects"]})
+    );
+    let scope_root = tmp.path().join("Agents/jarvis.tony");
+    assert!(scope_root.is_dir());
+    assert!(!scope_root.join("projects").exists());
+}
+
+#[test]
+fn delete_cleanup_stops_at_non_empty_ancestor() {
+    let tmp = TempDir::new().unwrap();
+    let tb = default_tb(&tmp);
+    write_note(&tb, "Agents/projects/old/notes.md");
+    write_note(&tb, "Agents/projects/todo.md");
+    let body = delete_note(&tb, "Agents/projects/old/notes.md");
+    assert_eq!(body["removed_dirs"], json!(["Agents/projects/old"]));
+}
+
+#[test]
+fn delete_keeps_folder_with_hidden_or_ignored_leftover() {
+    let tmp = TempDir::new().unwrap();
+    let tb = default_tb(&tmp);
+    write_note(&tb, "Agents/projects/notes.md");
+    let dir = tmp.path().join("Agents/jarvis.tony/projects");
+    std::fs::write(dir.join(".DS_Store"), b"").unwrap();
+    let body = delete_note(&tb, "Agents/projects/notes.md");
+    assert_eq!(body["removed_dirs"], json!([]));
+    assert!(dir.is_dir());
+
+    write_note(&tb, "Agents/drafts/notes.md");
+    std::fs::write(tmp.path().join(".gitignore"), "*.bak\n").unwrap();
+    let drafts = tmp.path().join("Agents/jarvis.tony/drafts");
+    std::fs::write(drafts.join("old.bak"), b"").unwrap();
+    let body = delete_note(&tb, "Agents/drafts/notes.md");
+    assert_eq!(body["removed_dirs"], json!([]));
+    assert!(drafts.is_dir());
+}
+
+#[test]
+fn delete_without_scheme_never_removes_vault_root() {
+    let tmp = TempDir::new().unwrap();
+    let tb = toolbox(&tmp, "", "", Policy::Namespaced);
+    call(
+        &tb,
+        "write_memory_note",
+        json!({"path":"topics/rust.md","content":"x"}),
+    )
+    .unwrap();
+    let body = structured(call(
+        &tb,
+        "delete_memory_note",
+        json!({"path":"topics/rust.md"}),
+    ));
+    assert_eq!(body["removed_dirs"], json!(["topics"]));
+    assert!(tmp.path().is_dir());
+}
+
+#[test]
+fn delete_shared_note_cleanup_stops_at_vault_root() {
+    let tmp = TempDir::new().unwrap();
+    let tb = toolbox(&tmp, "Agents", "<agent>.<user>", Policy::Readwrite);
+    write_note(&tb, "Scratch/team/notes.md");
+    let body = delete_note(&tb, "Scratch/team/notes.md");
+    assert_eq!(body["removed_dirs"], json!(["Scratch/team", "Scratch"]));
+    assert!(tmp.path().is_dir());
+}
+
+#[test]
+fn delete_with_cleanup_disabled_keeps_folders() {
+    let tmp = TempDir::new().unwrap();
+    let tb = toolbox_prune(&tmp, "Agents", "<agent>.<user>", Policy::Namespaced, false);
+    write_note(&tb, "Agents/projects/notes.md");
+    let body = delete_note(&tb, "Agents/projects/notes.md");
+    assert_eq!(body, json!({"deleted": true, "removed_dirs": []}));
+    assert!(tmp.path().join("Agents/jarvis.tony/projects").is_dir());
+}
+
+fn rename_note(tb: &Toolbox, path: &str, new_path: &str) -> Value {
+    structured(call(
+        tb,
+        "rename_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":path,"new_path":new_path}),
+    ))
+}
+
+#[test]
+fn rename_last_note_out_of_folder_removes_it() {
+    let tmp = TempDir::new().unwrap();
+    let tb = default_tb(&tmp);
+    write_note(&tb, "Agents/inbox/idea.md");
+    let body = rename_note(&tb, "Agents/inbox/idea.md", "Agents/topics/idea.md");
+    assert_eq!(body["removed_dirs"], json!(["Agents/inbox"]));
+    assert!(!tmp.path().join("Agents/jarvis.tony/inbox").exists());
+}
+
+#[test]
+fn rename_into_subfolder_of_source_folder_keeps_it() {
+    let tmp = TempDir::new().unwrap();
+    let tb = default_tb(&tmp);
+    write_note(&tb, "Agents/topics/rust.md");
+    let body = rename_note(&tb, "Agents/topics/rust.md", "Agents/topics/lang/rust.md");
+    assert_eq!(body["removed_dirs"], json!([]));
+    assert!(tmp.path().join("Agents/jarvis.tony/topics/lang").is_dir());
+}
+
+#[test]
+fn delete_that_removes_folders_keeps_recall_and_backlinks_consistent() {
+    let tmp = TempDir::new().unwrap();
+    let tb = recall_toolbox(&tmp);
+    call(
+        &tb,
+        "write_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/topics/rust.md","content":"rust"}),
+    )
+    .unwrap();
+    call(
+        &tb,
+        "write_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/old/memo.md","content":"the zyzzyva [[rust]]"}),
+    )
+    .unwrap();
+    let query = json!({"agent":"jarvis","user":"tony","query":"zyzzyva"});
+    let before = structured(call(&tb, "recall_memory_notes", query.clone()));
+    assert_eq!(before["hits"].as_array().unwrap().len(), 1);
+
+    let body = delete_note(&tb, "Agents/old/memo.md");
+    assert_eq!(body["removed_dirs"], json!(["Agents/old"]));
+
+    let after = structured(call(&tb, "recall_memory_notes", query));
+    assert_eq!(after["hits"], json!([]));
+    let read = structured(call(
+        &tb,
+        "read_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/topics/rust.md","backlinks":true}),
+    ));
+    assert_eq!(read["backlinks"], json!([]));
 }

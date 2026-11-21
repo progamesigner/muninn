@@ -1316,7 +1316,21 @@ impl Toolbox {
         }
         self.storage.delete(&physical)?;
         self.backlinks_on_delete(&scope, region, &physical);
-        Ok(ok_json(json!({ "deleted": true })))
+        let removed_dirs = self.prune_empty_parents(&scope, &physical);
+        Ok(ok_json(
+            json!({ "deleted": true, "removed_dirs": removed_dirs }),
+        ))
+    }
+
+    /// Prune the folders a delete left empty and report them as clean virtual paths.
+    fn prune_empty_parents(&self, scope: &str, physical: &PhysicalPath) -> Vec<String> {
+        let resolver = self.storage.resolver();
+        self.storage
+            .prune_empty_parents(physical, scope)
+            .iter()
+            .filter_map(|dir| resolver.clean_dir_path(dir, scope))
+            .map(|v| v.as_str().to_string())
+            .collect()
     }
 
     /// Move a note from `path` to `new_path`, rewriting every visible incoming
@@ -1456,12 +1470,14 @@ impl Toolbox {
         recall_guard.upsert(&scope, src_region, &src_physical);
         self.backlinks_on_delete(&scope, src_region, &src_physical);
         drop(recall_guard);
+        let removed_dirs = self.prune_empty_parents(&scope, &src_physical);
 
         Ok(ok_json(json!({
             "renamed": true,
             "path": vpath.as_str(),
             "new_path": new_vpath.as_str(),
             "notes_rewritten": notes_rewritten,
+            "removed_dirs": removed_dirs,
         })))
     }
 
@@ -2331,12 +2347,12 @@ fn build_tools(scheme: &Scheme, recall_enabled: bool) -> Vec<Tool> {
         ),
         tool(
             "delete_memory_note",
-            "Delete a single memory note by its virtual path.",
+            "Delete a single memory note by its virtual path. Folders left empty by the delete are removed (unless the server disables it) and listed in `removed_dirs`.",
             merge_schema(scheme, fields_schema::<PathFields>()),
         ),
         tool(
             "rename_memory_note",
-            "Move a single note from `path` to `new_path`, rewriting every visible incoming link (decorations preserved) to resolve to the new location. The destination must not already exist.",
+            "Move a single note from `path` to `new_path`, rewriting every visible incoming link (decorations preserved) to resolve to the new location. The destination must not already exist. Folders the move leaves empty at the source are removed (unless the server disables it) and listed in `removed_dirs`.",
             merge_schema(scheme, fields_schema::<RenameFields>()),
         ),
         tool(
