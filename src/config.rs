@@ -59,6 +59,7 @@ const VAR_TIMEZONE: &str = "MUNINN_TIMEZONE";
 const VAR_HONOR_IGNORE: &str = "MUNINN_HONOR_IGNORE_FILES";
 const VAR_INCLUDE_HIDDEN: &str = "MUNINN_INCLUDE_HIDDEN";
 const VAR_INCLUDE_HIDDEN_GLOBS: &str = "MUNINN_INCLUDE_HIDDEN_GLOBS";
+const VAR_PRUNE_EMPTY_DIRS: &str = "MUNINN_PRUNE_EMPTY_DIRS";
 const VAR_LOG: &str = "MUNINN_LOG";
 const VAR_RECALL_BACKEND: &str = "MUNINN_RECALL_BACKEND";
 const VAR_RECALL_WATCH_DEBOUNCE_MS: &str = "MUNINN_RECALL_WATCH_DEBOUNCE_MS";
@@ -386,6 +387,8 @@ pub struct Config {
     /// and their whole subtree — are exempted from hidden-segment filtering.
     /// Empty by default. Validated at build time.
     pub include_hidden_globs: Vec<String>,
+    /// Remove parent folders left empty by delete and rename.
+    pub prune_empty_dirs: bool,
     /// The `tracing_subscriber::EnvFilter` directive string.
     pub log_filter: String,
     /// Recall search configuration.
@@ -451,6 +454,9 @@ pub struct Cli {
     /// (overrides MUNINN_INCLUDE_HIDDEN_GLOBS).
     #[arg(long)]
     pub include_hidden_globs: Option<String>,
+    /// Remove folders emptied by delete and rename (overrides MUNINN_PRUNE_EMPTY_DIRS).
+    #[arg(long)]
+    pub prune_empty_dirs: Option<bool>,
     /// Tracing filter directive (overrides MUNINN_LOG).
     #[arg(long)]
     pub log: Option<String>,
@@ -526,6 +532,9 @@ impl Cli {
         }
         if let Some(v) = &self.include_hidden_globs {
             m.insert(VAR_INCLUDE_HIDDEN_GLOBS, v.clone());
+        }
+        if let Some(v) = &self.prune_empty_dirs {
+            m.insert(VAR_PRUNE_EMPTY_DIRS, v.to_string());
         }
         if let Some(v) = &self.log {
             m.insert(VAR_LOG, v.clone());
@@ -650,6 +659,8 @@ impl Config {
             ))
         })?;
 
+        let prune_empty_dirs = parse_bool(get, VAR_PRUNE_EMPTY_DIRS, true)?;
+
         // --- logging ---
         let log_filter = get(VAR_LOG)
             .filter(|s| !s.is_empty())
@@ -671,6 +682,7 @@ impl Config {
             honor_ignore_files,
             include_hidden,
             include_hidden_globs,
+            prune_empty_dirs,
             log_filter,
             recall,
         })
@@ -720,6 +732,7 @@ impl Config {
              honor_ignore_files = {ignore}\n\
              include_hidden = {hidden}\n\
              include_hidden_globs = {hidden_globs}\n\
+             prune_empty_dirs = {prune}\n\
              log_filter = {log}\n\
              recall_backend = {recall}\n\
              recall_index_dir = {index_dir}",
@@ -743,6 +756,7 @@ impl Config {
             } else {
                 self.include_hidden_globs.join(", ")
             },
+            prune = self.prune_empty_dirs,
             log = self.log_filter,
             recall = self.recall.backend.as_str(),
             index_dir = match &self.recall.index_dir {
@@ -1034,6 +1048,7 @@ mod tests {
         assert_eq!(cfg.timezone, Tz::UTC);
         assert!(cfg.honor_ignore_files);
         assert!(!cfg.include_hidden);
+        assert!(cfg.prune_empty_dirs);
         assert_eq!(cfg.log_filter, DEFAULT_LOG_FILTER);
         // Recall defaults: simple backend, documented tuning knobs.
         assert_eq!(cfg.recall.backend, RecallBackendKind::Simple);
@@ -1783,5 +1798,38 @@ mod tests {
         let cfg =
             Config::build(&|k| overrides.get(k).cloned().or_else(|| env.get(k).cloned())).unwrap();
         assert_eq!(cfg.include_hidden_globs, vec![".obsidian/**"]);
+    }
+
+    #[test]
+    fn prune_empty_dirs_can_be_disabled() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = build(with_root(&tmp, &[(VAR_PRUNE_EMPTY_DIRS, "false")])).unwrap();
+        assert!(!cfg.prune_empty_dirs);
+        assert!(cfg.describe().contains("prune_empty_dirs = false"));
+    }
+
+    #[test]
+    fn prune_empty_dirs_invalid_boolean_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let err = build(with_root(&tmp, &[(VAR_PRUNE_EMPTY_DIRS, "yes")])).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(VAR_PRUNE_EMPTY_DIRS) && msg.contains("yes"));
+    }
+
+    #[test]
+    fn cli_overrides_env_for_prune_empty_dirs() {
+        let tmp = TempDir::new().unwrap();
+        let cli = Cli {
+            root_dir: Some(tmp.path().to_path_buf()),
+            prune_empty_dirs: Some(false),
+            ..Default::default()
+        };
+        let overrides = cli.as_overrides();
+        let env: HashMap<String, String> = [(VAR_PRUNE_EMPTY_DIRS.to_string(), "true".to_string())]
+            .into_iter()
+            .collect();
+        let cfg =
+            Config::build(&|k| overrides.get(k).cloned().or_else(|| env.get(k).cloned())).unwrap();
+        assert!(!cfg.prune_empty_dirs);
     }
 }

@@ -184,6 +184,8 @@ pub struct Storage {
     /// fingerprint hashes the visibility settings that shape what gets ingested,
     /// and a compiled `Gitignore` cannot be read back.
     include_hidden_glob_patterns: Vec<String>,
+    /// Remove parent folders a delete leaves empty. On by default.
+    prune_empty_dirs: bool,
     locks: DashMap<PathBuf, Arc<Mutex<()>>>,
 }
 
@@ -207,8 +209,15 @@ impl Storage {
             include_hidden,
             include_hidden_globs,
             include_hidden_glob_patterns,
+            prune_empty_dirs: true,
             locks: DashMap::new(),
         }
+    }
+
+    /// Set whether [`Storage::prune_empty_parents`] removes emptied folders.
+    pub fn with_prune_empty_dirs(mut self, prune: bool) -> Storage {
+        self.prune_empty_dirs = prune;
+        self
     }
 
     pub fn resolver(&self) -> &PathResolver {
@@ -333,14 +342,7 @@ impl Storage {
         physical: &PhysicalPath,
         content: &str,
     ) -> Result<usize, MuninnError> {
-        self.mkdirs_for(physical)?;
-        let parent = physical.as_path().parent().ok_or(MuninnError::Io {
-            kind: std::io::ErrorKind::InvalidInput,
-            context: "resolving parent directory",
-        })?;
-
-        let mut temp = tempfile::NamedTempFile::new_in(parent)
-            .map_err(|e| MuninnError::io("creating temp file", &e))?;
+        let mut temp = self.open_temp_for(physical, &|_| {})?;
         temp.write_all(content.as_bytes())
             .map_err(|e| MuninnError::io("writing temp file", &e))?;
         temp.as_file()
@@ -374,8 +376,8 @@ impl Storage {
         })
     }
 
-    /// Delete a single file. Never removes directories; leaves an emptied parent
-    /// in place.
+    /// Delete a single file. Never removes directories; callers prune emptied
+    /// parents separately with [`Storage::prune_empty_parents`].
     pub fn delete(&self, physical: &PhysicalPath) -> Result<(), MuninnError> {
         self.with_target_lock(physical.as_path(), || {
             match std::fs::remove_file(physical.as_path()) {
@@ -386,6 +388,62 @@ impl Storage {
                 Err(e) => Err(MuninnError::io("deleting note", &e)),
             }
         })
+    }
+
+    /// Remove the parents of a deleted file that are now empty, deepest first,
+    /// stopping at the first non-empty directory or prune boundary. Returns the
+    /// removed directories. Errors end the walk and never propagate.
+    pub fn prune_empty_parents(
+        &self,
+        physical: &PhysicalPath,
+        rendered_scope: &str,
+    ) -> Vec<PathBuf> {
+        let mut removed = Vec::new();
+        if !self.prune_empty_dirs {
+            return removed;
+        }
+        let mut dir = physical.as_path().parent();
+        while let Some(d) = dir {
+            if self.resolver.is_prune_boundary(d, rendered_scope) {
+                break;
+            }
+            // Non-recursive: fails on any remaining entry, so content is never lost.
+            if let Err(e) = std::fs::remove_dir(d) {
+                tracing::debug!(error = %e, "stopped pruning empty folders");
+                break;
+            }
+            removed.push(d.to_path_buf());
+            dir = d.parent();
+        }
+        removed
+    }
+
+    /// Create the parent directories and a temp file beside the target. A
+    /// concurrent prune can remove a freshly created parent before the temp file
+    /// exists, so a missing parent is recreated a bounded number of times.
+    /// `before_temp` runs before each temp-file attempt (a test seam).
+    fn open_temp_for(
+        &self,
+        physical: &PhysicalPath,
+        before_temp: &dyn Fn(u32),
+    ) -> Result<tempfile::NamedTempFile, MuninnError> {
+        const ATTEMPTS: u32 = 3;
+        let parent = physical.as_path().parent().ok_or(MuninnError::Io {
+            kind: std::io::ErrorKind::InvalidInput,
+            context: "resolving parent directory",
+        })?;
+        let mut attempt = 0;
+        loop {
+            self.mkdirs_for(physical)?;
+            before_temp(attempt);
+            match tempfile::NamedTempFile::new_in(parent) {
+                Ok(temp) => return Ok(temp),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && attempt + 1 < ATTEMPTS => {
+                    attempt += 1;
+                }
+                Err(e) => return Err(MuninnError::io("creating temp file", &e)),
+            }
+        }
     }
 
     /// Create any missing parent directories for a write target.
@@ -783,6 +841,116 @@ mod tests {
         assert!(matches!(
             s.delete(&physical),
             Err(MuninnError::NotFound { .. })
+        ));
+    }
+
+    fn write_note(s: &Storage, scope: &str, path: &str) -> PhysicalPath {
+        let physical = s.resolver.resolve(scope, &vp(path)).unwrap();
+        s.write_atomic(&physical, "x").unwrap();
+        physical
+    }
+
+    #[test]
+    fn prune_removes_emptied_parents_up_to_scope_root() {
+        let tmp = TempDir::new().unwrap();
+        let s = storage(&tmp, "Agents", "<agent>.<user>", true, false);
+        let note = write_note(&s, "jarvis.tony", "Agents/projects/old/notes.md");
+        s.delete(&note).unwrap();
+        let removed = s.prune_empty_parents(&note, "jarvis.tony");
+        let root = s.resolver.vault_root().to_path_buf();
+        assert_eq!(
+            removed,
+            vec![
+                root.join("Agents/jarvis.tony/projects/old"),
+                root.join("Agents/jarvis.tony/projects"),
+            ]
+        );
+        assert!(root.join("Agents/jarvis.tony").is_dir());
+    }
+
+    #[test]
+    fn prune_stops_at_non_empty_ancestor() {
+        let tmp = TempDir::new().unwrap();
+        let s = storage(&tmp, "Agents", "<agent>.<user>", true, false);
+        let note = write_note(&s, "jarvis.tony", "Agents/projects/old/notes.md");
+        write_note(&s, "jarvis.tony", "Agents/projects/todo.md");
+        s.delete(&note).unwrap();
+        let removed = s.prune_empty_parents(&note, "jarvis.tony");
+        let root = s.resolver.vault_root().to_path_buf();
+        assert_eq!(removed, vec![root.join("Agents/jarvis.tony/projects/old")]);
+    }
+
+    #[test]
+    fn prune_keeps_folder_with_hidden_leftover() {
+        let tmp = TempDir::new().unwrap();
+        let s = storage(&tmp, "Agents", "<agent>.<user>", true, false);
+        let note = write_note(&s, "jarvis.tony", "Agents/projects/notes.md");
+        let dir = note.as_path().parent().unwrap().to_path_buf();
+        std::fs::write(dir.join(".DS_Store"), b"").unwrap();
+        s.delete(&note).unwrap();
+        assert!(s.prune_empty_parents(&note, "jarvis.tony").is_empty());
+        assert!(dir.is_dir());
+    }
+
+    #[test]
+    fn prune_never_removes_vault_root() {
+        let tmp = TempDir::new().unwrap();
+        let s = storage(&tmp, "", "", true, false);
+        let note = write_note(&s, "", "topics/rust.md");
+        s.delete(&note).unwrap();
+        let removed = s.prune_empty_parents(&note, "");
+        let root = s.resolver.vault_root().to_path_buf();
+        assert_eq!(removed, vec![root.join("topics")]);
+        assert!(root.is_dir());
+    }
+
+    #[test]
+    fn prune_disabled_keeps_folders() {
+        let tmp = TempDir::new().unwrap();
+        let s = storage(&tmp, "Agents", "<agent>.<user>", true, false).with_prune_empty_dirs(false);
+        let note = write_note(&s, "jarvis.tony", "Agents/projects/notes.md");
+        s.delete(&note).unwrap();
+        assert!(s.prune_empty_parents(&note, "jarvis.tony").is_empty());
+        assert!(note.as_path().parent().unwrap().is_dir());
+    }
+
+    #[test]
+    fn temp_file_recreates_parent_removed_concurrently() {
+        let tmp = TempDir::new().unwrap();
+        let s = storage(&tmp, "Agents", "<agent>.<user>", true, false);
+        let physical = s
+            .resolver
+            .resolve("jarvis.tony", &vp("Agents/projects/new.md"))
+            .unwrap();
+        let parent = physical.as_path().parent().unwrap().to_path_buf();
+        let temp = s
+            .open_temp_for(&physical, &|attempt| {
+                if attempt == 0 {
+                    std::fs::remove_dir(&parent).unwrap();
+                }
+            })
+            .unwrap();
+        assert!(temp.path().starts_with(&parent));
+    }
+
+    #[test]
+    fn temp_file_gives_up_after_bounded_attempts() {
+        let tmp = TempDir::new().unwrap();
+        let s = storage(&tmp, "Agents", "<agent>.<user>", true, false);
+        let physical = s
+            .resolver
+            .resolve("jarvis.tony", &vp("Agents/projects/new.md"))
+            .unwrap();
+        let parent = physical.as_path().parent().unwrap().to_path_buf();
+        let err = s
+            .open_temp_for(&physical, &|_| std::fs::remove_dir(&parent).unwrap())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MuninnError::Io {
+                kind: std::io::ErrorKind::NotFound,
+                ..
+            }
         ));
     }
 

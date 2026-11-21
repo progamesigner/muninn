@@ -55,7 +55,8 @@ impl MuninnServer {
             config.honor_ignore_files,
             config.include_hidden,
             &config.include_hidden_globs,
-        );
+        )
+        .with_prune_empty_dirs(config.prune_empty_dirs);
         // The recall engine reads through its own `Storage` view (it never writes,
         // so it needs no share of the write-lock map). `None` when recall is off.
         let recall = {

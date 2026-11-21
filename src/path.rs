@@ -297,6 +297,55 @@ impl PathResolver {
         Some(VirtualPath::from_relative(clean))
     }
 
+    /// Whether `dir` must survive empty-folder cleanup: the vault root, the agents
+    /// folder, the caller's per-scope root, or anything not strictly inside the vault.
+    pub fn is_prune_boundary(&self, dir: &std::path::Path, rendered_scope: &str) -> bool {
+        let Ok(rel_std) = dir.strip_prefix(&self.vault_root) else {
+            return true;
+        };
+        let Some(rel) = Utf8Path::from_path(rel_std) else {
+            return true;
+        };
+        if rel.as_str().is_empty() || rel == self.agents_dir {
+            return true;
+        }
+        if self.scheme.is_empty() {
+            return false;
+        }
+        let scope_root = self.join_agents(Utf8Path::new(rendered_scope));
+        rel == scope_root
+    }
+
+    /// The clean virtual path of a physical directory, with the caller's
+    /// per-scope segment removed inside the agents folder. `None` for a
+    /// directory outside the vault or belonging to another scope.
+    pub fn clean_dir_path(
+        &self,
+        dir: &std::path::Path,
+        rendered_scope: &str,
+    ) -> Option<VirtualPath> {
+        let rel = Utf8Path::from_path(dir.strip_prefix(&self.vault_root).ok()?)?;
+        if rel.as_str().is_empty() {
+            return None;
+        }
+        let in_agents: Option<&Utf8Path> = if self.agents_is_root() {
+            Some(rel)
+        } else {
+            rel.strip_prefix(&self.agents_dir).ok()
+        };
+        let Some(in_agents) = in_agents else {
+            return Some(VirtualPath::from_relative(rel.to_owned()));
+        };
+        if self.scheme.is_empty() {
+            return Some(VirtualPath::from_relative(rel.to_owned()));
+        }
+        let beneath = in_agents.strip_prefix(rendered_scope).ok()?;
+        if beneath.as_str().is_empty() {
+            return None;
+        }
+        Some(VirtualPath::from_relative(self.join_agents(beneath)))
+    }
+
     /// Reject any physical path whose nearest existing ancestor canonicalises to
     /// somewhere outside the vault root (catches `..` survivors and symlink
     /// escapes).
@@ -673,5 +722,58 @@ mod tests {
             strip_suffix_from_link_target("x.jarvis.tony.jarvis.tony", "jarvis.tony").as_deref(),
             Some("x.jarvis.tony")
         );
+    }
+
+    #[test]
+    fn prune_boundaries_with_scheme() {
+        let tmp = assert_fs::TempDir::new().unwrap();
+        let r = resolver(tmp.path(), "Agents", "<agent>.<user>");
+        let root = tmp.path().canonicalize().unwrap();
+        assert!(r.is_prune_boundary(&root, "jarvis.tony"));
+        assert!(r.is_prune_boundary(&root.join("Agents"), "jarvis.tony"));
+        assert!(r.is_prune_boundary(&root.join("Agents/jarvis.tony"), "jarvis.tony"));
+        assert!(r.is_prune_boundary(root.parent().unwrap(), "jarvis.tony"));
+        assert!(!r.is_prune_boundary(&root.join("Agents/jarvis.tony/topics"), "jarvis.tony"));
+        assert!(!r.is_prune_boundary(&root.join("Scratch"), "jarvis.tony"));
+    }
+
+    #[test]
+    fn prune_boundaries_with_empty_scheme_and_agents_at_root() {
+        let tmp = assert_fs::TempDir::new().unwrap();
+        let r = resolver(tmp.path(), "", "");
+        let root = tmp.path().canonicalize().unwrap();
+        assert!(r.is_prune_boundary(&root, ""));
+        assert!(!r.is_prune_boundary(&root.join("topics"), ""));
+    }
+
+    #[test]
+    fn clean_dir_path_strips_scope_segment() {
+        let tmp = assert_fs::TempDir::new().unwrap();
+        let r = resolver(tmp.path(), "Agents", "<agent>.<user>");
+        let root = tmp.path().canonicalize().unwrap();
+        let dir = root.join("Agents/jarvis.tony/projects/old");
+        let clean = r.clean_dir_path(&dir, "jarvis.tony").unwrap();
+        assert_eq!(clean.as_str(), "Agents/projects/old");
+        let shared = r
+            .clean_dir_path(&root.join("Scratch/team"), "jarvis.tony")
+            .unwrap();
+        assert_eq!(shared.as_str(), "Scratch/team");
+        assert_eq!(
+            r.clean_dir_path(&root.join("Agents/jarvis.sam/x"), "jarvis.tony"),
+            None
+        );
+        assert_eq!(
+            r.clean_dir_path(&root.join("Agents/jarvis.tony"), "jarvis.tony"),
+            None
+        );
+    }
+
+    #[test]
+    fn clean_dir_path_without_scheme() {
+        let tmp = assert_fs::TempDir::new().unwrap();
+        let r = resolver(tmp.path(), "", "");
+        let root = tmp.path().canonicalize().unwrap();
+        let clean = r.clean_dir_path(&root.join("topics/rust"), "").unwrap();
+        assert_eq!(clean.as_str(), "topics/rust");
     }
 }
