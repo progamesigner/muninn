@@ -7,6 +7,7 @@ and visibility across notes, links, and recall results, and preserve file integr
 with atomic writes and unambiguous edits.
 
 ## Requirements
+
 ### Requirement: Vault root containment
 The system SHALL canonicalise every virtual path against the configured vault root and SHALL reject any resolution whose canonical absolute path is not a descendant of that root.
 
@@ -166,6 +167,7 @@ An include-hidden glob list (configured via `MUNINN_INCLUDE_HIDDEN_GLOBS`) SHALL
 #### Scenario: Agents folder itself never filtered out
 - **WHEN** `MUNINN_AGENTS_DIR=.agents` (begins with `.`) and `MUNINN_INCLUDE_HIDDEN=false`
 - **THEN** the agents folder is still recognised as the scoped/suffixed region and its contents remain visible to and writable by the owning scope; hidden filtering does NOT exclude the agents folder, independent of any include-hidden glob list
+
 ### Requirement: Atomic full-file writes
 The system SHALL implement every full-file write as: create a temp file in the same directory as the target, write contents to the temp file, fsync, then rename the temp file over the target.
 
@@ -193,7 +195,7 @@ The system SHALL refuse an `edit_workspace_file` call whose `search_string` occu
 - **THEN** the call is rejected with code `edit_search_ambiguous`, the file is unchanged, and the error message advises the client to provide a longer, unique snippet
 
 ### Requirement: Auto-create parent directories on writes
-The system SHALL create any missing parent directories along the physical path during a write inside the agents folder before opening the temp file. For writes outside the agents folder (only possible under `readwrite` policy), parent directories SHALL likewise be auto-created.
+The system SHALL create any missing parent directories along the physical path during a write inside the agents folder before opening the temp file. For writes outside the agents folder (only possible under `readwrite` policy), parent directories SHALL likewise be auto-created. If a parent directory is removed by a concurrent operation after it was created and before the temp file is opened, the system SHALL recreate it and retry, so the write succeeds; it SHALL give up with an IO error only after a small bounded number of attempts.
 
 #### Scenario: First write into a new scope
 - **WHEN** `write_workspace_file` is called for a virtual path inside the agents folder and no directory for the caller's rendered suffix yet exists on disk
@@ -202,6 +204,10 @@ The system SHALL create any missing parent directories along the physical path d
 #### Scenario: First write outside the agents folder under readwrite
 - **WHEN** policy is `readwrite` and `write_workspace_file` is called for `Scratch/team/notes.md` where `Scratch/team/` does not yet exist
 - **THEN** the server creates the directory tree and then performs the atomic write
+
+#### Scenario: Concurrent folder cleanup does not fail a write
+- **WHEN** a write to `Agents/projects/new.md` creates `projects/` and a concurrent delete removes `projects/` as empty before the temp file is opened
+- **THEN** the write recreates `projects/` and succeeds with the caller's exact bytes on disk
 
 ### Requirement: Own-scope strictness extends to link targets in content
 
