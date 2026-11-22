@@ -4,7 +4,7 @@
 # Alpine's Rust image is musl-native, so a plain `cargo build` emits a static
 # binary with no cross linker. The builder runs on the target platform itself:
 # CI builds each arch on a native runner (amd64 and arm64), never under QEMU.
-FROM rust:1.99.1-alpine AS builder
+FROM rust:1.100.0-alpine AS builder
 
 # Docker sets TARGETARCH to the architecture currently being assembled.
 ARG TARGETARCH
