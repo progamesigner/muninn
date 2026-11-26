@@ -26,6 +26,8 @@ pub const DEFAULT_SCHEME: &str = "<agent>.<user>";
 pub const DEFAULT_SESSION_CONTEXT_FILE: &str = "AGENT_SESSION_CONTEXT.md";
 pub const DEFAULT_SESSION_BOOTSTRAP_FILE: &str = "AGENT_SESSION_BOOTSTRAP.md";
 pub const DEFAULT_MEMORY_LAYOUT_FILE: &str = "AGENT_MEMORY_LAYOUT.md";
+/// The default memory-conventions filename, relative to the vault root.
+pub const DEFAULT_MEMORY_CONVENTIONS_FILE: &str = "AGENT_MEMORY_CONVENTIONS.md";
 /// The default HTTP bind address.
 pub const DEFAULT_HTTP_BIND: &str = "127.0.0.1:8000";
 /// The default tracing filter directive.
@@ -49,6 +51,7 @@ const VAR_SCHEME: &str = "MUNINN_VFS_SCHEME";
 const VAR_SESSION_CONTEXT_TEMPLATE_FILE: &str = "MUNINN_SESSION_CONTEXT_TEMPLATE_FILE";
 const VAR_SESSION_BOOTSTRAP_TEMPLATE_FILE: &str = "MUNINN_SESSION_BOOTSTRAP_TEMPLATE_FILE";
 const VAR_MEMORY_LAYOUT_TEMPLATE_FILE: &str = "MUNINN_MEMORY_LAYOUT_TEMPLATE_FILE";
+const VAR_MEMORY_CONVENTIONS_FILE: &str = "MUNINN_MEMORY_CONVENTIONS_FILE";
 const VAR_POLICY: &str = "MUNINN_POLICY";
 const VAR_TRANSPORT: &str = "MUNINN_TRANSPORT";
 const VAR_HTTP_BIND: &str = "MUNINN_HTTP_BIND";
@@ -378,6 +381,8 @@ pub struct Config {
     pub session_bootstrap_template_file: PathBuf,
     /// Absolute path to the global memory-layout template file (may not exist).
     pub memory_layout_template_file: PathBuf,
+    /// Absolute path to the global memory-conventions file appended to the layout (may not exist).
+    pub memory_conventions_file: PathBuf,
     pub policy: Policy,
     pub transport: Transport,
     pub timezone: Tz,
@@ -421,6 +426,9 @@ pub struct Cli {
     /// Global memory-layout template file (overrides MUNINN_MEMORY_LAYOUT_TEMPLATE_FILE).
     #[arg(long)]
     pub memory_layout_template_file: Option<PathBuf>,
+    /// Global memory-conventions file appended to the layout (overrides MUNINN_MEMORY_CONVENTIONS_FILE).
+    #[arg(long)]
+    pub memory_conventions_file: Option<PathBuf>,
     /// Policy: scoped|namespaced|readonly|readwrite (overrides MUNINN_POLICY).
     #[arg(long)]
     pub policy: Option<String>,
@@ -500,6 +508,12 @@ impl Cli {
         if let Some(v) = &self.memory_layout_template_file {
             m.insert(
                 VAR_MEMORY_LAYOUT_TEMPLATE_FILE,
+                v.to_string_lossy().into_owned(),
+            );
+        }
+        if let Some(v) = &self.memory_conventions_file {
+            m.insert(
+                VAR_MEMORY_CONVENTIONS_FILE,
                 v.to_string_lossy().into_owned(),
             );
         }
@@ -622,6 +636,8 @@ impl Config {
         );
         let memory_layout_template_file =
             resolve_template_file(VAR_MEMORY_LAYOUT_TEMPLATE_FILE, DEFAULT_MEMORY_LAYOUT_FILE);
+        let memory_conventions_file =
+            resolve_template_file(VAR_MEMORY_CONVENTIONS_FILE, DEFAULT_MEMORY_CONVENTIONS_FILE);
 
         // --- policy ---
         let policy_raw = get(VAR_POLICY).unwrap_or_else(|| "namespaced".to_string());
@@ -676,6 +692,7 @@ impl Config {
             session_context_template_file,
             session_bootstrap_template_file,
             memory_layout_template_file,
+            memory_conventions_file,
             policy,
             transport,
             timezone,
@@ -726,6 +743,7 @@ impl Config {
              session_context_template_file = {sctf}\n\
              session_bootstrap_template_file = {sbtf}\n\
              memory_layout_template_file = {mltf}\n\
+             memory_conventions_file = {mcf}\n\
              policy = {policy:?}\n\
              transport = {transport}\n\
              timezone = {tz}\n\
@@ -746,6 +764,7 @@ impl Config {
             sctf = self.session_context_template_file.display(),
             sbtf = self.session_bootstrap_template_file.display(),
             mltf = self.memory_layout_template_file.display(),
+            mcf = self.memory_conventions_file.display(),
             policy = self.policy,
             transport = transport,
             tz = self.timezone,
@@ -1300,6 +1319,38 @@ mod tests {
         assert_eq!(
             cfg.memory_layout_template_file,
             PathBuf::from("/etc/muninn/layout.md")
+        );
+    }
+
+    #[test]
+    fn memory_conventions_file_default_and_override() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+
+        let cfg = build(with_root(&tmp, &[])).unwrap();
+        assert_eq!(
+            cfg.memory_conventions_file,
+            root.join("AGENT_MEMORY_CONVENTIONS.md")
+        );
+
+        let cfg = build(with_root(
+            &tmp,
+            &[(VAR_MEMORY_CONVENTIONS_FILE, "custom/conventions.md")],
+        ))
+        .unwrap();
+        assert_eq!(
+            cfg.memory_conventions_file,
+            root.join("custom/conventions.md")
+        );
+
+        let cfg = build(with_root(
+            &tmp,
+            &[(VAR_MEMORY_CONVENTIONS_FILE, "/etc/muninn/conventions.md")],
+        ))
+        .unwrap();
+        assert_eq!(
+            cfg.memory_conventions_file,
+            PathBuf::from("/etc/muninn/conventions.md")
         );
     }
 

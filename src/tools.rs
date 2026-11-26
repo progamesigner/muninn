@@ -67,7 +67,8 @@ pub const TOOL_NAMES: &[&str] = &[
 #[derive(JsonSchema, Deserialize)]
 #[allow(dead_code)]
 struct ListFields {
-    /// Optional virtual-path prefix, relative to the agents folder, to filter by.
+    /// Optional virtual-path prefix to filter by: relative to the agents folder
+    /// (`topics/rust`) or to the vault root (`Agents/topics/rust`).
     #[serde(default)]
     path_prefix: Option<String>,
     /// Optional glob pattern matched against each entry's clean, vault-root-relative
@@ -397,7 +398,8 @@ struct RecallFields {
     /// Include only notes modified strictly before this time. Same accepted
     /// formats, half-open semantics, and mtime caveat as `modified_after`.
     modified_before: Option<String>,
-    /// Optional virtual-path prefix, relative to the agents folder, to filter by.
+    /// Optional virtual-path prefix to filter by: relative to the agents folder
+    /// (`topics/rust`) or to the vault root (`Agents/topics/rust`).
     path_prefix: Option<String>,
     /// Maximum number of hits to return (default 200, maximum 1000).
     limit: Option<u64>,
@@ -431,6 +433,8 @@ pub struct TemplatePaths {
     pub session_bootstrap: PathBuf,
     /// The global memory-layout template file.
     pub memory_layout: PathBuf,
+    /// The global memory-conventions file appended to the layout.
+    pub memory_conventions: PathBuf,
 }
 
 impl Toolbox {
@@ -700,7 +704,12 @@ impl Toolbox {
         grant: &Grant,
     ) -> Result<String, MuninnError> {
         self.check_render_scope(scope, grant)?;
-        crate::session_context::render_layout(&self.storage, &self.templates.memory_layout, scope)
+        crate::session_context::render_layout(
+            &self.storage,
+            &self.templates.memory_layout,
+            &self.templates.memory_conventions,
+            scope,
+        )
     }
 
     /// Validate that `scope` carries exactly the scheme's placeholder keys
@@ -934,12 +943,7 @@ impl Toolbox {
         }
 
         if let Some(prefix) = &path_prefix {
-            let agents = self.storage.resolver().agents_dir();
-            let effective = if agents.as_str().is_empty() {
-                prefix.clone()
-            } else {
-                format!("{agents}/{prefix}")
-            };
+            let effective = self.storage.resolver().prefix_filter(prefix);
             let with_sep = format!("{effective}/");
             items.retain(|p| p == &effective || p.starts_with(&with_sep));
         }
@@ -1280,10 +1284,6 @@ impl Toolbox {
         self.policy
             .gate_write(region)
             .map_err(|e| Self::policy_err(e, &vpath))?;
-        // Match the on-disk (suffixed) link form: transform the search/replace
-        // snippets the same way stored content was transformed on write.
-        let search = self.expand_links_for(&scope, &vpath, &search)?;
-        let replace = self.expand_links_for(&scope, &vpath, &replace)?;
         let resolver = self.storage.resolver();
         let physical = resolver.resolve(&scope, &vpath)?;
         if !self.storage.is_visible(&physical) {
@@ -1291,9 +1291,18 @@ impl Toolbox {
                 virtual_path: vpath.as_str().to_string(),
             });
         }
-        let replaced = self
-            .storage
-            .edit_search_replace(&physical, &search, &replace)?;
+        // Match against the clean view a reader sees, so a search string may cut through a link.
+        if self.scheme().is_empty() {
+            self.storage
+                .edit_search_replace(&physical, &search, &replace)?;
+        } else {
+            self.storage.edit_with(&physical, |raw| {
+                crate::wikilink::edit_clean_view(raw, &scope, resolver, &search, &replace, |s| {
+                    self.expand_links_for(&scope, &vpath, s)
+                })
+            })?;
+        }
+        let replaced = search.len();
         self.recall_on_write(&scope, region, &physical);
         self.backlinks_on_write(&scope, region, &physical);
         Ok(ok_json(json!({ "chars_replaced": replaced })))

@@ -47,6 +47,8 @@ const PER_SCOPE_CONTEXT_FILE: &str = "AGENT_SESSION_CONTEXT.md";
 const PER_SCOPE_BOOTSTRAP_FILE: &str = "AGENT_SESSION_BOOTSTRAP.md";
 /// The per-scope layout template filename.
 const PER_SCOPE_LAYOUT_FILE: &str = "AGENT_MEMORY_LAYOUT.md";
+/// The per-scope conventions filename, appended after the layout.
+const PER_SCOPE_CONVENTIONS_FILE: &str = "AGENT_MEMORY_CONVENTIONS.md";
 
 /// Substituted for a `{{files.*}}` placeholder whose file does not exist.
 const MISSING_SENTINEL: &str = "(not yet recorded — set via evolve_core_persona)";
@@ -135,7 +137,24 @@ from the vault root, so you must prepend your agents-folder name yourself — e.
 when the agents folder is `Agents`, write a topic note as
 `Agents/topics/<topic>/<fact>.md`, not `topics/<topic>/<fact>.md`. A path without
 that leading segment lands outside the agents folder, where most policies are
-read-only.
+read-only. The `path_prefix` filter of `list_memory_notes` and
+`recall_memory_notes` accepts either form (in that example, `topics/rust` or
+`Agents/topics/rust`).
+
+Links between notes:
+- Link with `[[name]]`, `[[name|text]]`, `[[name#heading]]`, `![[name]]`, or
+  `[text](path.md)`. Write the shortest name that is unambiguous among the notes
+  you can see: `[[rust]]`, or `[[topics/rust]]` when two notes share the name.
+  Use the names that reads return, never names copied from files on disk.
+- The server resolves link targets when you write and shows clean names when you
+  read, so links keep working in Obsidian. A target that matches no note is kept
+  as written (a dangling link).
+- A note outside the agents folder cannot link to a note inside it; the write
+  fails with `write_denied`.
+- `edit_memory_note` matches its search string against the text as you read it,
+  links included.
+- Rename or move a note with `rename_memory_note`, which rewrites every link to
+  it. Writing a copy and deleting the original leaves those links dangling.
 
 Subfolders (free-form notes via `write_memory_note`/`edit_memory_note`):
 - `diary/<YYYY-MM-DD>.md` — daily diary.
@@ -265,10 +284,13 @@ pub fn render_session_context(
 /// Render the layout document for a validated scope map. Resolves the layout
 /// template (per-scope → global → compiled-in default) and substitutes any
 /// `{{scope.<key>}}` placeholders an operator override may use; the compiled-in
-/// default contains none. Never errors on absence.
+/// default contains none. A conventions file (per-scope → global) is appended
+/// after the layout when present, so a vault can add its own rules without
+/// copying the default. Never errors on absence.
 pub fn render_layout(
     storage: &Storage,
     global_layout_file: &Path,
+    global_conventions_file: &Path,
     scope: &BTreeMap<String, String>,
 ) -> Result<String, MuninnError> {
     let resolver = storage.resolver();
@@ -285,13 +307,23 @@ pub fn render_layout(
         context.insert(format!("scope.{k}"), v.clone());
     }
 
-    let source = resolve_template_source(
+    let mut source = resolve_template_source(
         storage,
         &rendered_scope,
         PER_SCOPE_LAYOUT_FILE,
         global_layout_file,
         DEFAULT_LAYOUT,
     )?;
+    let conventions = resolve_template_source(
+        storage,
+        &rendered_scope,
+        PER_SCOPE_CONVENTIONS_FILE,
+        global_conventions_file,
+        "",
+    )?;
+    if !conventions.trim().is_empty() {
+        source = format!("{}\n\n{}", source.trim_end(), conventions.trim_start());
+    }
     let rendered = Template::parse(&source).render(&context);
     if !rendered.unknown.is_empty() {
         tracing::warn!(
@@ -722,14 +754,23 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let storage = storage_for(&tmp, "<agent>.<user>");
         let global = tmp.path().join("missing.md");
-        let rendered =
-            render_layout(&storage, &global, &scope(&[("agent", "c"), ("user", "a")])).unwrap();
+        let rendered = render_layout(
+            &storage,
+            &global,
+            &no_conv(&tmp),
+            &scope(&[("agent", "c"), ("user", "a")]),
+        )
+        .unwrap();
         assert!(rendered.contains("# Memory Layout"));
         assert!(rendered.contains("ordinary filesystem"));
         assert!(rendered.contains("relative to the agents folder"));
         assert!(rendered.contains("prepend your agents-folder name"));
         assert!(rendered.contains("USER.md` ≤ 100 lines"));
         assert!(rendered.contains("MEMORY.md` ≤ 200 lines"));
+        assert!(rendered.contains("Links between notes"));
+        assert!(rendered.contains("rename_memory_note"));
+        assert!(rendered.contains("write_denied"));
+        assert!(rendered.contains("`Agents/topics/rust`"));
         // The internal suffix mechanism is not exposed.
         assert!(!rendered.contains("suffix"));
         // Onboarding guidance lives in the renderer, not the layout.
@@ -746,11 +787,11 @@ mod tests {
         let global = tmp.path().join("GLOBAL_LAYOUT.md");
         let s = scope(&[("agent", "c"), ("user", "a")]);
 
-        let rendered = render_layout(&storage, &global, &s).unwrap();
+        let rendered = render_layout(&storage, &global, &no_conv(&tmp), &s).unwrap();
         assert!(rendered.contains("# Memory Layout"));
 
         std::fs::write(&global, "GLOBAL-LAYOUT").unwrap();
-        let rendered = render_layout(&storage, &global, &s).unwrap();
+        let rendered = render_layout(&storage, &global, &no_conv(&tmp), &s).unwrap();
         assert_eq!(rendered, "GLOBAL-LAYOUT");
 
         write(
@@ -758,7 +799,39 @@ mod tests {
             "Agents/c.a/AGENT_MEMORY_LAYOUT.c.a.md",
             "layout for {{scope.agent}}",
         );
-        let rendered = render_layout(&storage, &global, &s).unwrap();
+        let rendered = render_layout(&storage, &global, &no_conv(&tmp), &s).unwrap();
         assert_eq!(rendered, "layout for c");
+    }
+
+    fn no_conv(tmp: &TempDir) -> std::path::PathBuf {
+        tmp.path().join("missing-conventions.md")
+    }
+
+    /// Conventions append after whichever layout won: per-scope beats global, and
+    /// `{{scope.*}}` substitutes in both parts.
+    #[test]
+    fn conventions_append_after_the_layout() {
+        let tmp = TempDir::new().unwrap();
+        let storage = storage_for(&tmp, "<agent>.<user>");
+        let layout = tmp.path().join("missing-layout.md");
+        let conventions = tmp.path().join("AGENT_MEMORY_CONVENTIONS.md");
+        let s = scope(&[("agent", "c"), ("user", "a")]);
+
+        let rendered = render_layout(&storage, &layout, &conventions, &s).unwrap();
+        assert_eq!(rendered, DEFAULT_LAYOUT);
+
+        std::fs::write(&conventions, "  \n").unwrap();
+        let rendered = render_layout(&storage, &layout, &conventions, &s).unwrap();
+        assert_eq!(rendered, DEFAULT_LAYOUT, "blank conventions add nothing");
+
+        std::fs::write(&conventions, "# Vault conventions\nfor {{scope.user}}\n").unwrap();
+        let rendered = render_layout(&storage, &layout, &conventions, &s).unwrap();
+        assert!(rendered.starts_with("# Memory Layout"));
+        assert!(rendered.ends_with("\n\n# Vault conventions\nfor a\n"));
+
+        write(&tmp, "Agents/c.a/AGENT_MEMORY_CONVENTIONS.c.a.md", "SCOPED");
+        let rendered = render_layout(&storage, &layout, &conventions, &s).unwrap();
+        assert!(rendered.ends_with("\n\nSCOPED"));
+        assert!(!rendered.contains("Vault conventions"));
     }
 }

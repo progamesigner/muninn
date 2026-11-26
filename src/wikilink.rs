@@ -435,12 +435,33 @@ fn path_ends_with_segments(haystack: &str, needle: &str) -> bool {
 /// the target portion is replaced with `new` (alias, heading, embed prefix, and
 /// link text are preserved); `Ok(None)` leaves the link unchanged. The first
 /// `Err` aborts and propagates.
-pub(crate) fn rewrite_links<F>(content: &str, mut f: F) -> Result<String, MuninnError>
+pub(crate) fn rewrite_links<F>(content: &str, f: F) -> Result<String, MuninnError>
+where
+    F: FnMut(LinkKind, &str) -> Result<Option<String>, MuninnError>,
+{
+    rewrite_links_with_spans(content, f).map(|(out, _)| out)
+}
+
+/// One link whose bytes [`rewrite_links_with_spans`] rewrote: its byte range in
+/// the input and in the output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LinkSpan {
+    input: (usize, usize),
+    output: (usize, usize),
+}
+
+/// [`rewrite_links`], also returning the span of every rewritten link in input
+/// order. Bytes outside these spans are copied verbatim.
+fn rewrite_links_with_spans<F>(
+    content: &str,
+    mut f: F,
+) -> Result<(String, Vec<LinkSpan>), MuninnError>
 where
     F: FnMut(LinkKind, &str) -> Result<Option<String>, MuninnError>,
 {
     let bytes = content.as_bytes();
     let mut out = String::with_capacity(content.len());
+    let mut spans = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
         // Wikilink or embed: optional leading '!' then "[[".
@@ -452,6 +473,7 @@ where
                 let (target, rest) = split_wikilink_inner(inner);
                 match f(LinkKind::Wikilink, target)? {
                     Some(new) => {
+                        let out_start = out.len();
                         if embed {
                             out.push('!');
                         }
@@ -459,6 +481,10 @@ where
                         out.push_str(&new);
                         out.push_str(rest);
                         out.push_str("]]");
+                        spans.push(LinkSpan {
+                            input: (i, open + 2 + close_rel + 2),
+                            output: (out_start, out.len()),
+                        });
                     }
                     None => out.push_str(&content[i..open + 2 + close_rel + 2]),
                 }
@@ -476,9 +502,14 @@ where
             if is_rewritable_markdown_target(target) {
                 match f(LinkKind::Markdown, target)? {
                     Some(new) => {
+                        let out_start = out.len();
                         out.push_str(&content[i..text_end]); // "[text]("
                         out.push_str(&new);
                         out.push(')');
+                        spans.push(LinkSpan {
+                            input: (i, link_end),
+                            output: (out_start, out.len()),
+                        });
                     }
                     None => out.push_str(&content[i..link_end]),
                 }
@@ -494,7 +525,66 @@ where
         out.push_str(&content[i..i + ch_len]);
         i += ch_len;
     }
-    Ok(out)
+    Ok((out, spans))
+}
+
+/// Replace the unique occurrence of `search` in the clean (stripped) view of the
+/// stored `raw` content, the same text a reader sees. The matched range widens
+/// to whole links where it cuts through one; only that range is re-expanded by
+/// `expand`, so every other stored byte is kept.
+pub(crate) fn edit_clean_view<E>(
+    raw: &str,
+    rendered_scope: &str,
+    resolver: &PathResolver,
+    search: &str,
+    replace: &str,
+    expand: E,
+) -> Result<String, MuninnError>
+where
+    E: FnOnce(&str) -> Result<String, MuninnError>,
+{
+    let (clean, spans) = rewrite_links_with_spans(raw, |kind, target| {
+        Ok(strip_target(kind, target, rendered_scope, resolver))
+    })?;
+    if search.is_empty() {
+        return Err(MuninnError::EditSearchNotFound);
+    }
+    let mut found = clean.match_indices(search);
+    let Some((start, _)) = found.next() else {
+        return Err(MuninnError::EditSearchNotFound);
+    };
+    let extra = found.count();
+    if extra > 0 {
+        return Err(MuninnError::EditSearchAmbiguous { count: extra + 1 });
+    }
+    let end = start + search.len();
+
+    // Widen [start, end) to whole links, then map both ends to raw offsets.
+    let mut lo = start;
+    let mut hi = end;
+    for span in &spans {
+        let (s, e) = span.output;
+        if s < lo && lo < e {
+            lo = s;
+        }
+        if s < hi && hi < e {
+            hi = e;
+        }
+    }
+    // `pos` never falls strictly inside a span, so only spans ending at or before it shift it.
+    let to_raw = |pos: usize| -> usize {
+        spans
+            .iter()
+            .filter(|span| span.output.1 <= pos)
+            .fold(pos, |acc, span| {
+                acc + (span.input.1 - span.input.0) - (span.output.1 - span.output.0)
+            })
+    };
+    let (raw_lo, raw_hi) = (to_raw(lo), to_raw(hi));
+
+    let region = format!("{}{}{}", &clean[lo..start], replace, &clean[end..hi]);
+    let expanded = expand(&region)?;
+    Ok(format!("{}{}{}", &raw[..raw_lo], expanded, &raw[raw_hi..]))
 }
 
 /// Split a wikilink body into its target and the preserved remainder

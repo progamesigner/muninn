@@ -54,6 +54,7 @@ fn toolbox(tmp: &TempDir, policy: Policy) -> Toolbox {
             session_context: tmp.path().join("AGENT_SESSION_CONTEXT.md"),
             session_bootstrap: tmp.path().join("AGENT_SESSION_BOOTSTRAP.md"),
             memory_layout: tmp.path().join("AGENT_MEMORY_LAYOUT.md"),
+            memory_conventions: tmp.path().join("AGENT_MEMORY_CONVENTIONS.md"),
         },
         None,
         backlinks,
@@ -168,6 +169,96 @@ fn edit_search_matches_clean_link_form() {
         read_content(&tb, "Agents/notes/index.md"),
         "now [[rust]] there"
     );
+}
+
+#[test]
+fn edit_search_may_cut_through_a_link() {
+    let tmp = TempDir::new().unwrap();
+    let tb = toolbox(&tmp, Policy::Namespaced);
+    seed_rust(&tb);
+    call(
+        &tb,
+        "write_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/notes/index.md",
+               "content":"a [[rust]] b\nc [[rust|alias]] d\n"}),
+    )
+    .unwrap();
+
+    for (search, replace) in [
+        ("rust]] b", "rust]] B"),
+        ("c [[ru", "C [[ru"),
+        ("alias]] d", "other]] D"),
+    ] {
+        call(
+            &tb,
+            "edit_memory_note",
+            json!({"agent":"jarvis","user":"tony","path":"Agents/notes/index.md",
+                   "search_string":search,"replace_string":replace}),
+        )
+        .unwrap_or_else(|e| panic!("edit {search:?} must match: {e}"));
+    }
+
+    assert_eq!(
+        read_content(&tb, "Agents/notes/index.md"),
+        "a [[rust]] B\nC [[rust|other]] D\n"
+    );
+    let disk = std::fs::read_to_string(
+        tmp.path()
+            .join("Agents/jarvis.tony/notes/index.jarvis.tony.md"),
+    )
+    .unwrap();
+    assert_eq!(
+        disk,
+        "a [[rust.jarvis.tony]] B\nC [[rust.jarvis.tony|other]] D\n"
+    );
+}
+
+#[test]
+fn edit_keeps_stored_bytes_outside_the_edited_range() {
+    let tmp = TempDir::new().unwrap();
+    let tb = toolbox(&tmp, Policy::Namespaced);
+    seed_rust(&tb);
+    // A human wrote an unsuffixed own-scope link in Obsidian; an unrelated edit must not touch it.
+    let disk_path = tmp
+        .path()
+        .join("Agents/jarvis.tony/notes/index.jarvis.tony.md");
+    std::fs::create_dir_all(disk_path.parent().unwrap()).unwrap();
+    std::fs::write(&disk_path, "keep [[rust]] as is\nedit me\n").unwrap();
+
+    call(
+        &tb,
+        "edit_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/notes/index.md",
+               "search_string":"edit me","replace_string":"see [[rust]]"}),
+    )
+    .unwrap();
+
+    let disk = std::fs::read_to_string(&disk_path).unwrap();
+    assert_eq!(disk, "keep [[rust]] as is\nsee [[rust.jarvis.tony]]\n");
+}
+
+#[test]
+fn edit_ambiguity_is_counted_in_the_clean_view() {
+    let tmp = TempDir::new().unwrap();
+    let tb = toolbox(&tmp, Policy::Namespaced);
+    seed_rust(&tb);
+    call(
+        &tb,
+        "write_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/notes/index.md",
+               "content":"[[rust]] and [[rust]]"}),
+    )
+    .unwrap();
+    let res = call(
+        &tb,
+        "edit_memory_note",
+        json!({"agent":"jarvis","user":"tony","path":"Agents/notes/index.md",
+               "search_string":"rust]]","replace_string":"x]]"}),
+    );
+    match res {
+        Err(e) => assert_eq!(e.code().as_str(), "edit_search_ambiguous"),
+        Ok(_) => panic!("expected edit_search_ambiguous"),
+    }
 }
 
 #[test]

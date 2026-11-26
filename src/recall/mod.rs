@@ -592,15 +592,9 @@ impl RecallEngine {
             });
         }
 
-        // Path-prefix filter, mirroring list_memory_notes (prefix relative to the
-        // agents folder).
+        // Path-prefix filter, mirroring list_memory_notes.
         if let Some(prefix) = &query.path_prefix {
-            let agents = self.storage.resolver().agents_dir();
-            let effective = if agents.as_str().is_empty() {
-                prefix.clone()
-            } else {
-                format!("{agents}/{prefix}")
-            };
+            let effective = self.storage.resolver().prefix_filter(prefix);
             let with_sep = format!("{effective}/");
             merged
                 .retain(|(_, h)| h.clean_path == effective || h.clean_path.starts_with(&with_sep));

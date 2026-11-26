@@ -376,6 +376,19 @@ impl Storage {
         })
     }
 
+    /// Rewrite a note under its target lock: `edit` maps the current content to
+    /// the new content, which is then written atomically.
+    pub fn edit_with<F>(&self, physical: &PhysicalPath, edit: F) -> Result<(), MuninnError>
+    where
+        F: FnOnce(&str) -> Result<String, MuninnError>,
+    {
+        self.with_target_lock(physical.as_path(), || {
+            let current = self.read(physical)?;
+            let updated = edit(&current)?;
+            self.write_atomic_locked(physical, &updated).map(|_| ())
+        })
+    }
+
     /// Delete a single file. Never removes directories; callers prune emptied
     /// parents separately with [`Storage::prune_empty_parents`].
     pub fn delete(&self, physical: &PhysicalPath) -> Result<(), MuninnError> {

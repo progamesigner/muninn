@@ -96,6 +96,7 @@ impl MuninnServer {
                 session_context: config.session_context_template_file.clone(),
                 session_bootstrap: config.session_bootstrap_template_file.clone(),
                 memory_layout: config.memory_layout_template_file.clone(),
+                memory_conventions: config.memory_conventions_file.clone(),
             },
             recall,
             backlinks,

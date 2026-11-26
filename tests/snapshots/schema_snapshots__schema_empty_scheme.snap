@@ -150,7 +150,7 @@ expression: "schemas_for(\"\")"
         },
         "path_prefix": {
           "default": null,
-          "description": "Optional virtual-path prefix, relative to the agents folder, to filter by.",
+          "description": "Optional virtual-path prefix to filter by: relative to the agents folder\n(`topics/rust`) or to the vault root (`Agents/topics/rust`).",
           "type": [
             "string",
             "null"

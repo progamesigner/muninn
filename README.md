@@ -160,6 +160,7 @@ and overrides — the matching variable (`--root-dir`, `--policy`, `--http-bind`
 | `MUNINN_SESSION_CONTEXT_TEMPLATE_FILE` | `<root>/AGENT_SESSION_CONTEXT.md` | Path to the global full session-context template (see [Session context](#session-context)). Relative paths resolve against the vault root. Need not exist — falls back to the compiled-in default. |
 | `MUNINN_SESSION_BOOTSTRAP_TEMPLATE_FILE` | `<root>/AGENT_SESSION_BOOTSTRAP.md` | Path to the global lean session-bootstrap template (see [Session context](#session-context)). Relative paths resolve against the vault root. Need not exist — falls back to the compiled-in default. |
 | `MUNINN_MEMORY_LAYOUT_TEMPLATE_FILE` | `<root>/AGENT_MEMORY_LAYOUT.md` | Path to the global memory-layout template (see [Session context](#session-context)). Relative paths resolve against the vault root. Need not exist — falls back to the compiled-in default. |
+| `MUNINN_MEMORY_CONVENTIONS_FILE` | `<root>/AGENT_MEMORY_CONVENTIONS.md` | Path to the global memory-conventions file, appended after the layout (see [Session context](#session-context)). Relative paths resolve against the vault root. Need not exist — nothing is appended. |
 | `MUNINN_POLICY` | `namespaced` | One of `scoped`, `namespaced`, `readonly`, `readwrite` (see [Policies](#policies)). |
 | `MUNINN_TRANSPORT` | `http` | `http` or `stdio`. |
 | `MUNINN_HTTP_BIND` | `127.0.0.1:8000` | HTTP bind address (http transport only). |
@@ -217,11 +218,11 @@ agents folder, there is no "outside" region, and wrapper tools resolve to
 
 | Tool | Purpose |
 |---|---|
-| `list_memory_notes` | Paginated listing of virtual paths visible to the scope (`limit` default 200, max 1000; opaque `cursor`; optional `path_prefix`). |
+| `list_memory_notes` | Paginated listing of virtual paths visible to the scope (`limit` default 200, max 1000; opaque `cursor`; optional `path_prefix`, relative to the agents folder or to the vault root). |
 | `read_memory_note` | Read a note by virtual path. Optional `include_version: true` adds an opaque version of the full stored snapshot, composing with line ranges and backlinks. Default responses are unchanged. |
 | `read_memory_notes` | Read 1–20 notes in one call. Returns one `notes` entry per requested path, in request order: `{ path, content }` on success or `{ path, error: { code, message } }` on failure. Per-path semantics match `read_memory_note`; a per-path failure never fails the call (only malformed arguments do). |
 | `write_memory_note` | Atomic full-file write; returns the byte count. With `append: true`, `content` is appended verbatim instead (exact bytes, no separator; a missing note is created), serialised under the per-target lock; the byte count is the note's total size after the write. |
-| `edit_memory_note` | Atomic search/replace; the search string must occur exactly once. |
+| `edit_memory_note` | Atomic search/replace; the search string must occur exactly once in the note as `read_memory_note` returns it, links included. |
 | `delete_memory_note` | Delete a single file, then remove the folders it left empty (see `MUNINN_PRUNE_EMPTY_DIRS`). |
 | `rename_memory_note` | Move a note from `path` to `new_path`, rewriting every visible incoming link (aliases, headings, and embeds preserved) and the note's own self-references to resolve to the new location. The destination must not already exist (`destination_exists`); all preconditions are validated before the first write. |
 | `read_note_properties` | Read a note's frontmatter properties as a JSON object in `{ properties }`. Absent, unterminated, or malformed frontmatter yields an empty object — never an error. Read gating matches `read_memory_note`; root core files are readable. |
@@ -385,6 +386,8 @@ write a link to your own scoped note is rewritten to its on-disk suffixed form s
 human browsing the vault in Obsidian can follow it, and a link to a shared note is
 left clean. Aliases (`[[t|alias]]`), headings (`[[t#h]]`), and embeds (`![[t]]`)
 are preserved. A link that does not resolve is left verbatim as a dangling link.
+`edit_memory_note` matches against the clean view too, so a search string may
+start or end inside a link; only the edited range is rewritten on disk.
 
 Because a suffixed link would expose your scope's existence, a note in the **shared
 region** that links to one of **your own scoped** notes is rejected with
@@ -417,6 +420,12 @@ path-addressing rule, and the documented line caps) lives in its own
 `AGENT_MEMORY_LAYOUT.md`, served on demand rather than embedded in every render.
 External-tool facts (camera, SSH, etc.) belong in `PROMPT.md`. Operators who
 supply their own templates fully control that prose.
+
+A vault that only wants to add its own rules puts them in
+`AGENT_MEMORY_CONVENTIONS.md` instead. It is resolved the same way (per-scope,
+then `MUNINN_MEMORY_CONVENTIONS_FILE`, with no compiled-in default) and appended
+after whichever layout won, so the vault keeps the server's default layout as it
+changes. A blank conventions file adds nothing.
 
 Each template is resolved per request, first hit wins (the bootstrap and layout
 follow the same layering with their own filenames and env vars):

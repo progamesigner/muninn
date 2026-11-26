@@ -87,6 +87,7 @@ fn recall_toolbox_tz(tmp: &TempDir, timezone: Tz) -> Toolbox {
             session_context: tmp.path().join("AGENT_SESSION_CONTEXT.md"),
             session_bootstrap: tmp.path().join("AGENT_SESSION_BOOTSTRAP.md"),
             memory_layout: tmp.path().join("AGENT_MEMORY_LAYOUT.md"),
+            memory_conventions: tmp.path().join("AGENT_MEMORY_CONVENTIONS.md"),
         },
         recall,
         backlink_engine(
@@ -139,6 +140,7 @@ fn frozen_toolbox_policy(tmp: &TempDir, backend: RecallBackendKind, policy: Poli
             session_context: tmp.path().join("AGENT_SESSION_CONTEXT.md"),
             session_bootstrap: tmp.path().join("AGENT_SESSION_BOOTSTRAP.md"),
             memory_layout: tmp.path().join("AGENT_MEMORY_LAYOUT.md"),
+            memory_conventions: tmp.path().join("AGENT_MEMORY_CONVENTIONS.md"),
         },
         recall,
         backlink_engine(tmp, "Agents", "<agent>.<user>", policy, Duration::ZERO),
@@ -171,6 +173,7 @@ fn toolbox_prune(
             session_context: tmp.path().join("AGENT_SESSION_CONTEXT.md"),
             session_bootstrap: tmp.path().join("AGENT_SESSION_BOOTSTRAP.md"),
             memory_layout: tmp.path().join("AGENT_MEMORY_LAYOUT.md"),
+            memory_conventions: tmp.path().join("AGENT_MEMORY_CONVENTIONS.md"),
         },
         None,
         backlink_engine(tmp, agents, scheme, policy, Duration::ZERO),
@@ -269,6 +272,50 @@ fn list_path_prefix_filters_inside_agents_folder() {
         .map(|v| v.as_str().unwrap())
         .collect();
     assert_eq!(items, vec!["Agents/topics/rust.md"]);
+}
+
+#[test]
+fn path_prefix_also_accepts_the_vault_root_form() {
+    let tmp = TempDir::new().unwrap();
+    let tb = frozen_recall_toolbox(&tmp);
+    for path in ["Agents/topics/rust.md", "Agents/other/go.md"] {
+        call(
+            &tb,
+            "write_memory_note",
+            json!({"agent":"jarvis","user":"tony","path":path,"content":"needle"}),
+        )
+        .unwrap();
+    }
+
+    for prefix in ["topics", "topics/", "Agents/topics", "Agents/topics/"] {
+        let body = structured(call(
+            &tb,
+            "list_memory_notes",
+            json!({"agent":"jarvis","user":"tony","path_prefix":prefix}),
+        ));
+        assert_eq!(
+            body["items"],
+            json!(["Agents/topics/rust.md"]),
+            "list prefix {prefix:?}"
+        );
+
+        let body = structured(call(
+            &tb,
+            "recall_memory_notes",
+            json!({"agent":"jarvis","user":"tony","query":"needle","path_prefix":prefix}),
+        ));
+        let paths: Vec<&str> = body["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            paths,
+            vec!["Agents/topics/rust.md"],
+            "recall prefix {prefix:?}"
+        );
+    }
 }
 
 #[test]
@@ -4620,6 +4667,7 @@ fn frozen_backlink_toolbox(tmp: &TempDir) -> Toolbox {
             session_context: tmp.path().join("AGENT_SESSION_CONTEXT.md"),
             session_bootstrap: tmp.path().join("AGENT_SESSION_BOOTSTRAP.md"),
             memory_layout: tmp.path().join("AGENT_MEMORY_LAYOUT.md"),
+            memory_conventions: tmp.path().join("AGENT_MEMORY_CONVENTIONS.md"),
         },
         None,
         backlink_engine(
@@ -4650,6 +4698,7 @@ fn frozen_backlink_toolbox_readwrite(tmp: &TempDir) -> Toolbox {
             session_context: tmp.path().join("AGENT_SESSION_CONTEXT.md"),
             session_bootstrap: tmp.path().join("AGENT_SESSION_BOOTSTRAP.md"),
             memory_layout: tmp.path().join("AGENT_MEMORY_LAYOUT.md"),
+            memory_conventions: tmp.path().join("AGENT_MEMORY_CONVENTIONS.md"),
         },
         None,
         backlink_engine(

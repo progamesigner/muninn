@@ -147,6 +147,20 @@ impl PathResolver {
         &self.agents_dir
     }
 
+    /// The vault-root-relative form of a `path_prefix` filter. The prefix may be
+    /// relative to the agents folder (`topics/rust`) or already start with it
+    /// (`Agents/topics/rust`); the second reading wins when both could apply.
+    /// A trailing `/` is ignored.
+    pub fn prefix_filter(&self, prefix: &str) -> String {
+        let prefix = prefix.trim_end_matches('/');
+        let agents = self.agents_dir.as_str();
+        if agents.is_empty() || prefix == agents || prefix.starts_with(&format!("{agents}/")) {
+            prefix.to_string()
+        } else {
+            format!("{agents}/{prefix}")
+        }
+    }
+
     pub fn scheme(&self) -> &Scheme {
         &self.scheme
     }
